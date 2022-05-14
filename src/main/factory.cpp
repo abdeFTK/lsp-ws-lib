@@ -21,6 +21,8 @@
 
 #include <lsp-plug.in/ws/factory.h>
 
+#include <private/win32/Win32Display.h>
+
 #ifdef USE_LIBX11
     #include <private/x11/X11Display.h>
 #endif /* USE_LIBX11 */
@@ -45,6 +47,20 @@ namespace lsp
                 }
             }
         #endif /* USE_LIBX11 */
+        
+            // Create Win32 display
+            {
+                win32::Win32Display *dpy = new win32::Win32Display();
+                if (dpy != NULL)
+                {
+                    status_t res = dpy->init(argc, argv);
+                    if (res == STATUS_OK) {
+                        lsp_debug("Win32Display initialized");
+                        return dpy;
+                    }
+                    lsp_ws_free_display(dpy);
+                }
+            }
             return NULL;
         }
 
