@@ -21,11 +21,14 @@
 
 #include <lsp-plug.in/ws/factory.h>
 
+#include <lsp-plug.in/common/debug.h>
+
 #include <private/win32/Win32Display.h>
 
 #ifdef USE_LIBX11
     #include <private/x11/X11Display.h>
 #endif /* USE_LIBX11 */
+
 
 namespace lsp
 {
@@ -47,7 +50,6 @@ namespace lsp
                 }
             }
         #endif /* USE_LIBX11 */
-        
             // Create Win32 display
             {
                 win32::Win32Display *dpy = new win32::Win32Display();

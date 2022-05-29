@@ -12,18 +12,6 @@
 
 #include <windows.h>
 
-
-// extern "C" {
-
-//     HINSTANCE hInstance;
-
-//     BOOL WINAPI DllMain (HINSTANCE hInst, DWORD dwReason, LPVOID lpvReserved)
-//     {
-//         hInstance = hInst;
-//         return 1;
-//     }
-// }
-
 namespace lsp
 {
     namespace ws
@@ -34,6 +22,12 @@ namespace lsp
             class Win32Window: public IWindow, public IEventHandler {
                 
                 public:
+
+                    enum flags_t
+                    {
+                        F_GRABBING      = 1 << 0,
+                        F_LOCKING       = 1 << 1
+                    };
 
                     typedef struct btn_event_t
                     {
@@ -47,7 +41,7 @@ namespace lsp
                         Win32Window* parent;
                     };
 
-                    explicit Win32Window(Win32Display *core, IEventHandler *handler, void* nativeHwnd, void* parentHwnd, bool wrapper);
+                    explicit Win32Window(Win32Display *core, IEventHandler *handler, void* nativeHwnd, void* parentHwnd, void* ownerHwnd, size_t screen, bool wrapper, HINSTANCE hIn, const wchar_t* wcName);
                     virtual ~Win32Window();
 
                     virtual status_t    init();
@@ -75,16 +69,7 @@ namespace lsp
                             return TRUE;
                     }
 
-                    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-                    {
-                        Win32Window* window = reinterpret_cast<Win32Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-                        if (window) return window->internalWindowProc(hwnd, msg, wParam, lParam);
-                        return DefWindowProc(hwnd, msg, wParam, lParam);
-                    }
-
-                    const HMODULE GetCurrentModule();
-
-                    LRESULT CALLBACK internalWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+                    LRESULT internalWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
                     inline IEventHandler *get_handler() { return pHandler; }
 
@@ -180,29 +165,45 @@ namespace lsp
                     size_limit_t        sConstraints;
                     ISurface           *pSurface;
                     rectangle_t         sSize;
+                    POINT               rootWndPos;
                     size_t              nActions;
                     HWND hwnd;
+                    HWND hwndNative;
                     btn_event_t         vBtnEvent[3];
-                
+
+                    void handle_wm_size(UINT left, UINT right, UINT width, UINT height);
+                    void handle_wm_paint();
+                    
                 private:
 
                     HDC hdc;
-                    HWND hwndNative;
+                    
                     HWND hwndParent;
+                    HWND hwndOwner;
                     HINSTANCE hInstance;
+                    const wchar_t* wndClsName;
+                    
                     border_style_t enBorderStyle;
                     bool windowVisible;
                     bool rendering;
+                    TRACKMOUSEEVENT tme;
+                    size_t              nFlags;
+                    bool isTracking;
+                    size_t              nScreen;
+                    mouse_pointer_t     enPointer;
 
                     void handle_wm_create();
-                    void handle_wm_size(UINT left, UINT right, UINT width, UINT height);
-                    void handle_wm_move();
-                    void handle_wm_paint();
-                    void updateLayeredWindow();
-                    void handle_mouse_button(bool down, POINT pt);
-                    void handle_mouse_move(bool down, POINT pt);
+                    
+                    
+                    void handle_key(ui_event_type_t type);
+                    void handle_mouse_button(code_t button, size_t type, POINT pt, size_t state);
+                    void handle_mouse_move(POINT pt, size_t state);
+                    void handle_mouse_scroll(int delta, POINT pt, size_t state);
+                    void handle_mouse_hover(bool enter, POINT pt);
                     void drop_surface();
                     void handle_wm_hide();
+                    void handle_wm_focus(bool focused);
+                    size_t decode_mouse_state(size_t vKey);
 
                     void calc_constraints(rectangle_t *dst, const rectangle_t *req);
             };

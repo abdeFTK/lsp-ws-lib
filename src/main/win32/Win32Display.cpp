@@ -11,7 +11,11 @@
 #include <private/win32/Win32Display.h>
 #include <private/win32/Win32CairoSurface.h>
 
+// End mark for main PeekMessage loop
+#define        USER_LOOP_END     (WM_USER + 0)
 
+static HMODULE currentModuleHandle = NULL;
+static HMODULE currentDllModuleHandle = NULL;
 
 namespace lsp
 {
@@ -19,51 +23,209 @@ namespace lsp
     {
         namespace win32
         {
+            static int cursor_shapes[] =
+            {
+                -1,                         // MP_NONE
+                OCR_NORMAL,                  // MP_ARROW
+                OCR_SIZEALL,                // MP_ARROW_LEFT
+                OCR_SIZEALL,                // MP_ARROW_RIGHT
+                OCR_SIZEALL,                // MP_ARROW_UP
+                OCR_SIZEALL,                // MP_ARROW_DOWN
+                OCR_HAND,                   // MP_HAND
+                OCR_CROSS,                  // MP_CROSS
+                OCR_IBEAM,                  // MP_IBEAM
+                OCR_HAND,                   // MP_DRAW
+                OCR_CROSS,                   // MP_PLUS
+                OCR_SIZENESW,               // MP_SIZE_NESW
+                OCR_SIZENS,                 // MP_SIZE_NS
+                OCR_SIZEWE,                 // MP_SIZE_WE
+                OCR_SIZENWSE,               // MP_SIZE_NWSE
+                OCR_UP,                // MP_UP_ARROW
+                OCR_WAIT,                   // MP_HOURGLASS
+                OCR_HAND,                   // MP_DRAG
+                OCR_NO,                     // MP_NO_DROP
+                OCR_NO,                     // MP_DANGER
+                OCR_SIZEWE,                 // MP_HSPLIT
+                OCR_SIZENS,                 // MP_VPSLIT
+                OCR_HAND,                   // MP_MULTIDRAG
+                OCR_APPSTARTING,            // MP_APP_START
+                OCR_NORMAL                    // MP_HELP
+            };
 
             Win32Display::Win32Display()
             {
-                lsp_debug("Win32Display constructor");
                 bExit           = false;
                 hFtLibrary = NULL;
-                root        = NULL;
                 bzero(&sCairoUserDataKey, sizeof(sCairoUserDataKey));
+                wndClassName = std::wstring(L"LSP_Window");
             }
 
             Win32Display::~Win32Display()
             {
             }
 
+            LRESULT CALLBACK Win32Display::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+            {
+                Win32Window* window = reinterpret_cast<Win32Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+                if (window) return window->internalWindowProc(hwnd, msg, wParam, lParam);
+               
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
+
+            const HMODULE Win32Display::GetCurrentModule()
+            {
+                if (currentModuleHandle == NULL)
+                {
+                    static int lpMod = 0;
+                    BOOL status = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                                    (LPCWSTR) this,
+                                                    &currentModuleHandle);
+                }
+                return currentModuleHandle;
+            }
+
+            const HMODULE Win32Display::GetCurrentDllModule()
+            {
+                if (currentDllModuleHandle == NULL)
+                {
+                    static int lpMod = 0;
+                    BOOL status = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                                    (LPCWSTR) &lpMod,
+                                                    &currentDllModuleHandle);
+                }
+                return currentDllModuleHandle;
+            }
+
             status_t Win32Display::init(int argc, const char **argv)
             {
+                // Get Main application icon
+                WCHAR szPath[MAX_PATH];
+                WCHAR filename[] = L"lsp.ico";
+                //WORD iconIdx;
+                GetModuleFileNameW(GetCurrentDllModule(), szPath, MAX_PATH);
+
+                LSPString str;
+                str.append_utf16(szPath);
+                io::Path path;
+                path.set(&str);
+                path.parent();
+                path.append_child("lsp.ico");
+                WCHAR* szDirPath = path.as_string()->clone_utf16();
+
+                //mainIcon = ExtractAssociatedIconW(GetCurrentModule(), szPath, &iconIdx);
+                mainIcon = (HICON)LoadImageW(NULL, szDirPath, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_LOADFROMFILE);
+                // Register the window class.
+                hInstance = GetCurrentModule();
+                WNDCLASSEXW wc = { };
+                wc.cbSize = sizeof(WNDCLASSEXW);
+                wc.lpfnWndProc   = WndProc;
+                wc.hInstance     = hInstance;
+                wc.lpszClassName = wndClassName.c_str();
+                wc.style = 0;
+                wc.hIcon = mainIcon;
+                wc.hbrBackground = NULL;
+
+                ATOM registerRes = RegisterClassExW(&wc);
+                if (registerRes == 0) {
+                    DWORD errorReg = GetLastError();
+                    lsp_debug("RegisterClassExW LAST ERROR %ld", errorReg);
+                }
+
+                // Initialize cursors
+                for (size_t i=0; i<__MP_COUNT; ++i)
+                {
+                    vCursors[i] = LoadImageW(NULL, MAKEINTRESOURCEW(cursor_shapes[i]), IMAGE_CURSOR, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
+                }
                 return STATUS_OK;
                 //return IDisplay::init(argc, argv);
             }
 
+            HANDLE Win32Display::get_cursor(mouse_pointer_t pointer)
+            {
+                if (pointer == MP_DEFAULT)
+                    pointer = MP_ARROW;
+                else if ((pointer < 0) || (pointer > __MP_COUNT))
+                    pointer = MP_NONE;
+
+                return vCursors[pointer];
+            }
+
             IWindow *Win32Display::create_window()
             {
-                lsp_debug("CreateWindow");
-                return new Win32Window(this, NULL, NULL, NULL, false);
+                int nScreen = findFreeScreenNumber();
+                HWND ownerHwnd = NULL;
+                Win32Window* sOwnerWnd = findRootWindow(default_screen());
+                if (sOwnerWnd != NULL) {
+                    ownerHwnd = sOwnerWnd->hwnd;
+                }
+                Win32Window* root = new Win32Window(this, NULL, NULL, NULL, ownerHwnd, nScreen, false, hInstance, wndClassName.c_str());
+                rootWindows.add(root);
+                return root;
             }
 
             IWindow *Win32Display::create_window(size_t screen)
             {
-                lsp_debug("CreateWindow screen %ld", screen);
-                return new Win32Window(this, NULL, NULL, root->hwnd, false);
+                Win32Window* sRootWnd = findRootWindow(screen);
+                if (sRootWnd != NULL) {
+                    return new Win32Window(this, NULL, NULL, sRootWnd->hwnd, NULL, screen, false, hInstance, wndClassName.c_str());
+                }
+                return NULL;
             }
 
             IWindow *Win32Display::create_window(void *handle)
             {
-                lsp_debug("CreateWindow with parent");
                 lsp_trace("handle = %p", handle);
-                root = new Win32Window(this, NULL, handle, NULL, false);
+
+                int nScreen = findFreeScreenNumber();
+                Win32Window* root = new Win32Window(this, NULL, handle, NULL, NULL, nScreen, false, hInstance, wndClassName.c_str());
+                rootWindows.add(root);
                 return root;
             }
 
             IWindow *Win32Display::wrap_window(void *handle)
             {
-                lsp_debug("Wrap Window with parent");
-                root = new Win32Window(this, NULL, handle, NULL, true);
+                int nScreen = findFreeScreenNumber();
+                Win32Window* root = new Win32Window(this, NULL, handle, NULL, NULL, nScreen, true, hInstance, wndClassName.c_str());
+                rootWindows.add(root);
                 return root;
+            }
+
+            Win32Window* Win32Display::findRootWindow(int screen) {
+                Win32Window* sRootWnd = NULL;
+                for (int i=0, nroot = rootWindows.size(); i<nroot; ++i) {
+                    if (rootWindows.get(i)->screen() == screen) {
+                        sRootWnd = rootWindows.get(i);
+                        break;
+                    }
+                }
+                return sRootWnd;
+            }
+
+            int Win32Display::findScreenOwner(HWND hwnd) {
+                int screenOwner = 0;
+                for (int i=0, nroot = rootWindows.size(); i<nroot; ++i) {
+                    if (rootWindows.get(i)->hwnd == hwnd) {
+                        screenOwner = rootWindows.get(i)->screen();
+                        break;
+                    }
+                }
+                return screenOwner;
+            }
+            
+            int Win32Display::findFreeScreenNumber(){
+                int nScreen = 1;
+                bool found = true;
+                do {
+                    found = true;
+                    for (int i=0, nroot = rootWindows.size(); i<nroot; ++i) {
+                        if (rootWindows.get(i)->screen() == nScreen) {
+                            nScreen++;
+                            found = false;
+                            break;
+                        }
+                    }
+                } while (!found);
+                return nScreen;
             }
 
             ISurface *Win32Display::create_surface(size_t width, size_t height)
@@ -73,14 +235,21 @@ namespace lsp
 
             void Win32Display::destroy()
             {
+                rootWindows.flush();
+                vWindows.flush();
+                sPending.flush();
+                for (size_t i=0; i<__GRAB_TOTAL; ++i)
+                    vGrab[i].clear();
+                sTargets.clear();
+
+                DestroyIcon(mainIcon);
+
                 IDisplay::destroy();
             }
 
             status_t Win32Display::main()
             {
-                lsp_debug("Display MAIN");
                 system::time_t ts;
-                //MSG msg; 
 
                 while (!bExit)
                 {
@@ -110,26 +279,6 @@ namespace lsp
                         if (result != STATUS_OK)
                             return result;
                     }
-
-                    // lsp_debug("PeekMessageW");
-                    // // TODO pass root window in param
-                    // while (PeekMessageW(&msg, NULL,  0, 0, PM_REMOVE)) 
-                    // { 
-                    //     lsp_debug("PeekMessageW %d", msg.message);
-                    //     switch(msg.message) 
-                    //     { 
-                    //         case WM_DESTROY:
-                    //         {
-                    //             PostQuitMessage(0);
-                    //             return STATUS_OK;
-                    //         }
-                    //         default:
-                    //         {
-                    //             TranslateMessage(&msg);
-                    //             DispatchMessageW(&msg); 
-                    //         }
-                    //     } 
-                    // }
                 }
 
                 return STATUS_OK;
@@ -137,7 +286,61 @@ namespace lsp
 
             status_t Win32Display::wait_events(wssize_t millis)
             {
-                //IDisplay::wait_events(millis);
+                if (bExit)
+                    return STATUS_OK;
+
+                system::time_t ts;
+                // Get current time
+                system::get_time(&ts);
+
+                timestamp_t xts         = (timestamp_t(ts.seconds) * 1000) + (ts.nanos / 1000000);
+                timestamp_t deadline    = xts + millis;
+
+                MSG msg;
+                system::time_t wmTs;
+
+                do
+                {
+                    wssize_t wtime      = deadline - xts; // How many milliseconds to wait
+
+                    if (sTasks.size() > 0)
+                    {
+                        dtask_t *t          = sTasks.first();
+                        ssize_t delta       = t->nTime - xts;
+                        if (delta <= 0)
+                            wtime               = -1;
+                        else if (delta <= wtime)
+                            wtime               = delta;
+                    }
+                    else if (GetQueueStatus(QS_ALLEVENTS) != 0)
+                        wtime               = 0;
+
+                    system::get_time(&wmTs);
+                    timestamp_t wmTsMsBegin     = (timestamp_t(wmTs.seconds) * 1000) + (wmTs.nanos / 1000000);
+                    timestamp_t wmTsMsEnd     = wmTsMsBegin + wtime; // How many milliseconds to wait
+                    timestamp_t counter       = wmTsMsBegin;
+
+                    int queueStatus = 0;
+
+                    while (counter < wmTsMsEnd) 
+                    { 
+                        if (GetQueueStatus(QS_ALLEVENTS) == 0) {
+                            system::get_time(&wmTs);
+                            counter     = (timestamp_t(wmTs.seconds) * 1000) + (wmTs.nanos / 1000000);
+                        } else {
+                            queueStatus = 1;
+                            break;
+                        }
+                    }
+
+                    if ((wtime <= 0) || (queueStatus > 0))
+                        break;
+
+                    // Get current time
+                    system::get_time(&ts);
+                    xts         = (timestamp_t(ts.seconds) * 1000) + (ts.nanos / 1000000);
+                } while (!bExit);
+
                 return STATUS_OK;
             }
 
@@ -153,20 +356,131 @@ namespace lsp
                 //     pFocusWindow = NULL;
 
                 // Remove window from list
+                rootWindows.premove(wnd);
                 if (!vWindows.premove(wnd))
                     return false;
 
                 // Check if need to leave main cycle
                 if (vWindows.size() <= 0) {
-                    lsp_debug("leave main cycle");
                     bExit = true;
                 }
                     
                 return true;
             }
 
+            status_t Win32Display::grab_events(Win32Window *wnd, grab_t group)
+            {
+                // Check validity of argument
+                if (group >= __GRAB_TOTAL)
+                    return STATUS_BAD_ARGUMENTS;
+
+                // Check that window does not belong to any active grab group
+                for (int i=0; i<__GRAB_TOTAL; ++i)
+                {
+                    lltl::parray<Win32Window> &g = vGrab[i];
+                    if (g.index_of(wnd) >= 0)
+                    {
+                        lsp_warn("Grab duplicated for window %p", wnd);
+                        return STATUS_DUPLICATED;
+                    }
+                }
+
+                lltl::parray<Win32Window> &g = vGrab[group];
+                // Add a grab
+                if (g.add(wnd))
+                    return STATUS_NO_MEM;
+
+                return STATUS_OK;
+            }
+
+            status_t Win32Display::ungrab_events(Win32Window *wnd)
+            {
+                bool found = false;
+                // Check that window does belong to any active grab group
+                for (int i=0; i<__GRAB_TOTAL; ++i)
+                {
+                    lltl::parray<Win32Window> &g = vGrab[i];
+                    if (g.premove(wnd))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                // Return error if not found
+                if (!found)
+                {
+                    return STATUS_NO_GRAB;
+                }
+
+                return STATUS_OK;
+            }
+
+            bool Win32Display::prepare_dispatch(Win32Window* src) {
+                // Clear the collection
+                sTargets.clear();
+                // Check if there is grab enabled and obtain list of receivers
+                bool has_grab = false;
+                for (int i=__GRAB_TOTAL-1; i>=0; --i)
+                {
+                    lltl::parray<Win32Window> &g = vGrab[i];
+                    if (g.size() > 0) {
+                        // Add listeners from grabbing windows
+                        for (int j=0; j<g.size(); ++j)
+                        {
+                            Win32Window *wnd = g.uget(j);
+                            if ((wnd == NULL) || (vWindows.index_of(wnd) < 0)) {
+                                g.remove(j);
+                            } 
+                            else if (wnd != src) {
+                                sTargets.add(wnd);
+                            }
+                        }
+                    }
+
+                    // Finally, break if there are target windows
+                    if (sTargets.size() > 0)
+                    {
+                        has_grab = true;
+                        break;
+                    }
+                }
+                return has_grab;
+            }
+
+            bool Win32Display::dispatch_event(Win32Window* src, event_t *ev) 
+            {
+                bool has_grab = false;
+                if (sTargets.size() > 0)
+                {
+                    has_grab = true;
+                }
+
+                event_t ud;
+                ud = *ev;
+                ud.nState       = 0;
+
+                // Deliver the message to target windows
+                for (size_t i=0, nwnd = sTargets.size(); i<nwnd; ++i)
+                {
+                    Win32Window *wnd = sTargets.uget(i);
+
+                    if ((wnd == NULL) || (vWindows.index_of(wnd) < 0)) {
+                        sTargets.remove(i);
+                    } else {
+                        RECT rect;
+                        MapWindowPoints(src->hwnd, wnd->hwnd, (LPPOINT) &rect, 2);
+                        ud.nLeft = rect.left;
+                        ud.nTop = rect.top;
+                        wnd->handle_event(&ud);
+                    }
+                }
+                return has_grab;
+            }
+
             void Win32Display::sync()
             { 
+                GdiFlush();
             }
 
             status_t Win32Display::main_iteration()
@@ -178,12 +492,35 @@ namespace lsp
 
                 // Do iteration
                 return do_main_iteration(xts);
-                //return STATUS_OK;
             }
 
             status_t Win32Display::do_main_iteration(timestamp_t ts)
             {
                 status_t result = STATUS_OK;
+                MSG msg; 
+
+                Win32Window* rtWd = findRootWindow(default_screen());
+                HWND nativeHwnd = NULL;
+                if (rtWd != NULL) {
+                    nativeHwnd = rtWd->hwndNative;
+                }
+                
+                if (nativeHwnd == NULL) {
+                    long loopTime = 0;
+                    PostMessageW(NULL, USER_LOOP_END, 0, 0);
+                    while (PeekMessageW(&msg, NULL,  0, 0, PM_REMOVE) != 0)
+                    { 
+                         if (msg.message == USER_LOOP_END) {
+                            loopTime = GetMessageTime();
+                        } else {
+                            TranslateMessage(&msg);
+                            DispatchMessageW(&msg); 
+                            if (loopTime != 0 && GetMessageTime() > loopTime) {
+                                break;
+                            }
+                        }
+                    }
+                }
 
                 // Generate list of tasks for processing
                 sPending.clear();
@@ -220,7 +557,7 @@ namespace lsp
                     {
                         dtask_t *t  = sPending.uget(i);
 
-                        //lsp_debug("Process task : %ld", t->nID);
+                        ////lsp_debug("Process task : %ld", t->nID);
                         // Process task
                         result  = t->pHandler(t->nTime, ts, t->pArg);
                         if (result != STATUS_OK)
@@ -228,32 +565,14 @@ namespace lsp
                     }
                 }
 
-                LPMSG msg; 
-
-                system::time_t wmTs;
-                // Get current time
-                system::get_time(&wmTs);
-                timestamp_t wmTsMsInitial     = (timestamp_t(wmTs.seconds) * 1000) + (wmTs.nanos / 1000000);
-                timestamp_t wtime           = 50; // How many milliseconds to wait
-                timestamp_t countDown       = 0;
-
-                // if (hRootWnd == NULL)
-                //     lsp_debug("Main iteration : hRootWnd is NULL");
-                // else
-                //     lsp_debug("Main iteration : hRootWnd is NOT NULL");
-
-                // if (hRootWnd != NULL) { 
-                //     while (countDown < wtime) 
-                //     { 
-                //         PeekMessageW(msg, hRootWnd,  0, 0, PM_NOREMOVE);
-                //         DispatchMessageW(msg);
-                //         system::get_time(&wmTs);
-                //         timestamp_t wmTsMs     = (timestamp_t(wmTs.seconds) * 1000) + (wmTs.nanos / 1000000);
-                //         countDown =  wmTsMs - wmTsMsInitial;
-                //     }
-                // }
-
-                // lsp_debug("PeekMessage processed");
+                if (nativeHwnd != NULL) {
+                    for (int i=0, nwnd = rootWindows.size(); i<nwnd; ++i) {
+                        Win32Window* rtw = rootWindows.get(i);
+                        if (rtw != NULL && rtw->hwnd != NULL && PeekMessageW(&msg, rtw->hwnd,  WM_PAINT, WM_PAINT, PM_REMOVE) != 0) {
+                            rtw->handle_wm_paint();
+                        }
+                    }
+                }
 
                 // Call for main task
                 call_main_task(ts);
@@ -269,7 +588,7 @@ namespace lsp
 
             size_t Win32Display::screens()
             {
-                return 1;
+                return rootWindows.size() + 1;
             }
 
             size_t Win32Display::default_screen()
@@ -279,18 +598,14 @@ namespace lsp
 
             status_t Win32Display::screen_size(size_t screen, ssize_t *w, ssize_t *h)
             {
-                if (screen == 1) {
-                    if (w != NULL)
-                        *w = root->width();
-                    if (h != NULL)
-                        *h = root->height();
-                } else {
-                    // TODO HWND GetDesktopWindow();
-                    if (w != NULL)
-                        *w = 1920;
-                    if (h != NULL)
-                        *h = 1080;
-                }
+                Win32Window* sRootWnd = findRootWindow(screen);
+                if (sRootWnd == NULL)
+                    return STATUS_BAD_STATE;
+                
+                if (w != NULL)
+                    *w = sRootWnd->width();
+                if (h != NULL)
+                    *h = sRootWnd->height();
 
                 return STATUS_OK;
             }
@@ -322,13 +637,31 @@ namespace lsp
 
             status_t Win32Display::get_pointer_location(size_t *screen, ssize_t *left, ssize_t *top)
             {
-                if (screen != NULL)
-                    *screen = 1;
-                if (left != NULL)
-                    *left   = 10;
-                if (top != NULL)
-                    *top    = 10;
-                return STATUS_OK;
+                POINT p;
+                HWND hwndPointer;
+                int screenOwner;
+                // Get cursor position in screen coordinates
+                if (GetCursorPos(&p)) {
+                    // Get window handle below cursor
+                    if ((hwndPointer = WindowFromPoint(p)) != NULL) {
+                        // Get screen below cursor
+                        if ((screenOwner = findScreenOwner(hwndPointer)) > 0) {
+                            Win32Window* sRootWnd = findRootWindow(screenOwner);
+                            // Map cursor position in window coordinates
+                            if (sRootWnd != NULL && sRootWnd->hwnd != NULL && ScreenToClient(sRootWnd->hwnd, &p)) {
+                                if (screen != NULL)
+                                    *screen = screenOwner;
+                                if (left != NULL)
+                                    *left   = p.x;
+                                if (top != NULL)
+                                    *top    = p.y;
+
+                                return STATUS_OK;
+                            }
+                        }
+                    }
+                }
+                return STATUS_NOT_FOUND;
             }
 
             status_t Win32Display::add_font(const char* name, const char* path)
@@ -360,7 +693,7 @@ namespace lsp
                 if (res != STATUS_OK)
                     return res;
 
-                lsp_debug("Loading font '%s' from file '%s'", name, path->get_native());
+                //lsp_debug("Loading font '%s' from file '%s'", name, path->get_native());
                 res = add_font(name, &ifs);
                 status_t res2 = ifs.close();
 
@@ -537,16 +870,60 @@ namespace lsp
 
             status_t Win32Display::add_font_alias(const char* name, const char* alias)
             {
+                if ((name == NULL) || (alias == NULL))
+                    return STATUS_BAD_ARGUMENTS;
+
+                if (vCustomFonts.exists(name))
+                    return STATUS_ALREADY_EXISTS;
+
+                font_t *f = alloc_font_object(name);
+                if (f == NULL)
+                    return STATUS_NO_MEM;
+                if ((f->alias = strdup(alias)) == NULL)
+                {
+                    unload_font_object(f);
+                    return STATUS_NO_MEM;
+                }
+
+                // Register font data
+                if (!vCustomFonts.create(name, f))
+                {
+                    unload_font_object(f);
+                    return STATUS_NO_MEM;
+                }
+
                 return STATUS_OK;
             }
 
             status_t Win32Display::remove_font(const char* name)
             {
+                if (name == NULL)
+                    return STATUS_BAD_ARGUMENTS;
+
+                font_t *f = NULL;
+                if (!vCustomFonts.remove(name, &f))
+                    return STATUS_NOT_FOUND;
+
+                unload_font_object(f);
                 return STATUS_OK;
             }
 
             void Win32Display::remove_all_fonts()
             {
+                // Deallocate previously allocated fonts
+                lsp_trace("FT_MANAGE removing all previously loaded fonts");
+                drop_custom_fonts();
+            }
+
+            void Win32Display::drop_custom_fonts()
+            {
+                lltl::parray<font_t> fonts;
+                vCustomFonts.values(&fonts);
+                vCustomFonts.flush();
+
+                // Destroy all font objects
+                for (size_t i=0, n=fonts.size(); i<n; ++i)
+                    unload_font_object(fonts.uget(i));
             }
         }
     }

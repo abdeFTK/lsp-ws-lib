@@ -5,6 +5,7 @@
 #include <lsp-plug.in/common/endian.h>
 #include <lsp-plug.in/common/debug.h>
 #include <lsp-plug.in/ws/IWindow.h>
+#include <lsp-plug.in/ipc/Thread.h>
 
 #include <private/win32/Win32Window.h>
 #include <private/win32/Win32CairoSurface.h>
@@ -12,9 +13,8 @@
 #include <windowsx.h>
 #include <lsp-plug.in/runtime/system.h>
 
-
-
-static HMODULE currentModuleHandle = NULL;
+// True while the window is resized from the bottom right corner
+static bool inMouseResize = false;
 
 namespace lsp
 {
@@ -23,20 +23,23 @@ namespace lsp
         namespace win32
         {
 
-            Win32Window::Win32Window(Win32Display *core, IEventHandler *handler, void* nativeHwnd, void* parentHwnd, bool wrapper): IWindow(core, handler) 
+            Win32Window::Win32Window(Win32Display *core, IEventHandler *handler, void* nativeHwnd, void* parentHwnd, void* ownerHwnd, size_t screen, bool wrapper, HINSTANCE hIn, const wchar_t* wcName): IWindow(core, handler) 
             {
                 hwndNative = (HWND)nativeHwnd;
                 hwndParent = (HWND)parentHwnd;
+                hwndOwner = (HWND)ownerHwnd;
+                hInstance = hIn;
+                wndClsName = wcName;
                 bWrapper = wrapper;
-                // if (parentHwnd == NULL) {
-                //     bWrapper = true;
-                // }
-                
+                nScreen = screen;
 
                 sSize.nLeft             = 0;
                 sSize.nTop              = 0;
                 sSize.nWidth            = 32;
                 sSize.nHeight           = 32;
+
+                rootWndPos.x            = 0;
+                rootWndPos.y            = 0;
 
                 sConstraints.nMinWidth  = -1;
                 sConstraints.nMinHeight = -1;
@@ -45,8 +48,13 @@ namespace lsp
                 sConstraints.nPreWidth  = -1;
                 sConstraints.nPreHeight = -1;
 
+                pSurface = NULL;
+
                 enBorderStyle           = BS_SIZEABLE;
                 nActions                = ws::WA_ALL;
+                nFlags                  = 0;
+                enPointer               = MP_DEFAULT;
+                isTracking = false;
                 
                 for (size_t i=0; i<3; ++i)
                 {
@@ -62,28 +70,23 @@ namespace lsp
                 do_destroy();
             }
 
-            const HMODULE Win32Window::GetCurrentModule()
+            LRESULT Win32Window::internalWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             {
-                if (currentModuleHandle == NULL)
-                {
-                    BOOL status = GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                                    (LPCTSTR) &currentModuleHandle,
-                                                    &currentModuleHandle);
-                }
-                return currentModuleHandle;
-            }
-
-            LRESULT CALLBACK Win32Window::internalWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-            {
-                //lsp_debug("internalWindowProc : %d", uMsg);
                 if (this->hwnd != hwnd || this->hwnd == NULL) {
-                    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+                    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
                 }
                 switch (uMsg)
                 {
+                case WM_CLOSE:
+                    {
+                        event_t ue;
+                        init_event(&ue);
+                        ue.nType        = UIE_CLOSE;
+                        handle_event(&ue);
+                        return 0;
+                    }
                 case WM_DESTROY:
                     {
-                        //lsp_debug("WM_DESTROY");
                         do_destroy();
                         return 0;
                     }
@@ -106,13 +109,38 @@ namespace lsp
                     }
                 case WM_WINDOWPOSCHANGED:
                     {
+                        RECT rect;
                         WINDOWPOS* windowPos = (WINDOWPOS*)lParam;
-                        UINT left = windowPos->x;
-                        UINT right = windowPos->y;
-                        UINT width = windowPos->cx;
-                        UINT height = windowPos->cy;
-                        handle_wm_size(left, right, width, height);
+                        rect.left = windowPos->x;
+                        rect.top = windowPos->y;
+                        rect.right = windowPos->cx;
+                        rect.bottom = windowPos->cy;
+
+                        rootWndPos.x = windowPos->x;
+                        rootWndPos.y = windowPos->y;
+
+                        if (hwndNative == NULL && hwndParent == NULL) {
+                            GetClientRect(hwnd, &rect);
+                        }
+
+                        handle_wm_size(rect.left, rect.top, rect.right, rect.bottom);
                         return 0;
+                    }
+                case WM_GETMINMAXINFO:
+                    {
+                        WINDOWINFO wndInfo;
+                        wndInfo.cbSize = sizeof(WINDOWINFO);
+                        GetWindowInfo(hwnd, &wndInfo);
+
+                        UINT extraWidth = (wndInfo.rcClient.left - wndInfo.rcWindow.left) + (wndInfo.rcWindow.right - wndInfo.rcClient.right);
+                        UINT extraHeight = (wndInfo.rcClient.top - wndInfo.rcWindow.top) + (wndInfo.rcWindow.bottom - wndInfo.rcClient.bottom); 
+
+                        POINT minSize;
+                        minSize.x = sConstraints.nMinWidth + extraWidth;
+                        minSize.y = sConstraints.nMinHeight + extraHeight;
+                        MINMAXINFO* minMaxInfo = (MINMAXINFO*)lParam;
+                        minMaxInfo->ptMinTrackSize = minSize;
+                        break;
                     }
                 case WM_MOVE:
                     {
@@ -124,10 +152,7 @@ namespace lsp
                     }
                 case WM_NCPAINT:
                     {
-                        if (hwndNative != NULL) { // || hwndParent != NULL) {
-                            handle_wm_paint();
-                            return 0;
-                        } else if (hwndParent != NULL) {
+                        if (hwndParent != NULL) {
                             RECT rect;
                             RECT clipRect;
                             int border = 1;
@@ -158,12 +183,51 @@ namespace lsp
                         handle_wm_paint();
                         return 0;
                     }
+                case WM_MOUSELEAVE:
+                    {
+                        POINT pt;
+                        pt.x = GET_X_LPARAM(lParam);
+                        pt.y = GET_Y_LPARAM(lParam);
+                        if (isTracking) {
+                            isTracking = false;
+                            handle_mouse_hover(false, pt);
+                            return 0;
+                        }
+                    }
+                case WM_MOUSEWHEEL:
+                    {
+                        int zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+                        POINT pt;
+                        pt.x = GET_X_LPARAM(lParam);
+                        pt.y = GET_Y_LPARAM(lParam); 
+                        size_t vKey = GET_KEYSTATE_WPARAM(wParam);
+                        size_t state = decode_mouse_state(vKey);
+                        MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT) &pt, 1);
+                        handle_mouse_scroll(zDelta, pt, state);
+                        return 0;
+                    }
                 case WM_LBUTTONDOWN:
                     {
                         POINT pt;
                         pt.x = GET_X_LPARAM(lParam);
                         pt.y = GET_Y_LPARAM(lParam);
-                        handle_mouse_button(true, pt);
+
+                        if (hwndNative != NULL) {
+                            RECT rect;
+                            GetClientRect(hwnd, &rect);
+                            if (pt.x > rect.right - 10 && pt.y > rect.bottom - 10) {
+                                SetCapture(hwnd);
+                                HANDLE cur = static_cast<Win32Display *>(pDisplay)->get_cursor(MP_SIZE_NWSE);
+                                if (cur != NULL)
+                                    SetCursor((HCURSOR)cur);
+                                inMouseResize = true;
+                                return 0;
+                            }
+                        }
+
+                        size_t vKey = wParam;
+                        size_t state = decode_mouse_state(vKey);
+                        handle_mouse_button(MCB_LEFT, UIE_MOUSE_DOWN, pt, state);
                         return 0;
                     }
                 case WM_LBUTTONUP:
@@ -171,7 +235,64 @@ namespace lsp
                         POINT pt;
                         pt.x = GET_X_LPARAM(lParam);
                         pt.y = GET_Y_LPARAM(lParam);
-                        handle_mouse_button(false, pt);
+
+                        if (inMouseResize) {
+                            HANDLE cur = static_cast<Win32Display *>(pDisplay)->get_cursor(MP_ARROW);
+                            if (cur != NULL)
+                                SetCursor((HCURSOR)cur);
+                        }
+                        inMouseResize = false;
+
+                        size_t vKey = wParam;
+                        size_t state = decode_mouse_state(vKey);
+                        handle_mouse_button(MCB_LEFT, UIE_MOUSE_UP, pt, state);
+                        return 0;
+                    }
+                case WM_CAPTURECHANGED:
+                    {
+                        if (hwndNative != NULL) {
+                             inMouseResize = false;
+                        }
+                        break;
+                    }
+                case WM_RBUTTONDOWN:
+                    {
+                        POINT pt;
+                        pt.x = GET_X_LPARAM(lParam);
+                        pt.y = GET_Y_LPARAM(lParam);
+                        size_t vKey = wParam;
+                        size_t state = decode_mouse_state(vKey);
+                        handle_mouse_button(MCB_RIGHT, UIE_MOUSE_DOWN, pt, state);
+                        return 0;
+                    }
+                case WM_RBUTTONUP:
+                    {
+                        POINT pt;
+                        pt.x = GET_X_LPARAM(lParam);
+                        pt.y = GET_Y_LPARAM(lParam);
+                        size_t vKey = wParam;
+                        size_t state = decode_mouse_state(vKey);
+                        handle_mouse_button(MCB_RIGHT, UIE_MOUSE_UP, pt, state);
+                        return 0;
+                    }
+                case WM_MBUTTONDOWN:
+                    {
+                        POINT pt;
+                        pt.x = GET_X_LPARAM(lParam);
+                        pt.y = GET_Y_LPARAM(lParam);
+                        size_t vKey = wParam;
+                        size_t state = decode_mouse_state(vKey);
+                        handle_mouse_button(MCB_MIDDLE, UIE_MOUSE_DOWN, pt, state);
+                        return 0;
+                    }
+                case WM_MBUTTONUP:
+                    {
+                        POINT pt;
+                        pt.x = GET_X_LPARAM(lParam);
+                        pt.y = GET_Y_LPARAM(lParam);
+                        size_t vKey = wParam;
+                        size_t state = decode_mouse_state(vKey);
+                        handle_mouse_button(MCB_MIDDLE, UIE_MOUSE_UP, pt, state);
                         return 0;
                     }
                 case WM_MOUSEMOVE:
@@ -179,12 +300,64 @@ namespace lsp
                         POINT pt;
                         pt.x = GET_X_LPARAM(lParam); 
                         pt.y = GET_Y_LPARAM(lParam); 
-                        handle_mouse_move(false, pt);
+
+                        if (hwndNative != NULL) {
+                            RECT rect;
+                            GetClientRect(hwnd, &rect);
+                            if (inMouseResize && GetCapture() == hwnd) {
+                                long minWidth = sConstraints.nMinWidth;
+                                long minHeight = sConstraints.nMinHeight;
+                                int width = std::max(minWidth, pt.x); 
+                                int height = std::max(minHeight, pt.y); 
+                                resize(width, height);
+                                return 0;
+                            } else if (pt.x > rect.right - 10 && pt.y > rect.bottom - 10) {
+                                HANDLE cur = static_cast<Win32Display *>(pDisplay)->get_cursor(MP_SIZE_NWSE);
+                                if (cur != NULL)
+                                    SetCursor((HCURSOR)cur);
+                                return 0;
+                            }
+                        }
+
+                        size_t vKey = wParam;
+                        size_t state = decode_mouse_state(vKey);
+                        handle_mouse_move(pt, state);
+                        if (!isTracking) {
+                            isTracking = true;
+                            set_mouse_pointer(enPointer);
+                            handle_mouse_hover(true, pt);
+                            TrackMouseEvent(&tme);
+                        }
                         return 0;
                     }
+                case WM_KEYDOWN:
+                    {
+                        handle_key(UIE_KEY_DOWN);
+                        return 0;
+                    }
+                case WM_KEYUP:
+                    {
+                        handle_key(UIE_KEY_UP);
+                        return 0;
+                    }
+                case WM_CHAR:
+                    {
+                        lsp_debug("WM_CHAR %ld", wParam);
+                        break;
+                    }
+                case WM_SETFOCUS:
+                    {
+                        handle_wm_focus(true);
+                        return 0;
+                    }
+                case WM_KILLFOCUS:
+                    {
+                        handle_wm_focus(false);
+                        return 0;
+                    }   
                 }
                 
-                return DefWindowProc(hwnd, uMsg, wParam, lParam);
+                return DefWindowProcW(hwnd, uMsg, wParam, lParam);
             }
 
             status_t Win32Window::init()
@@ -193,23 +366,8 @@ namespace lsp
                 rendering = false;
                 static_cast<Win32Display *>(pDisplay)->add_window(this);
                 if (bWrapper) {
-                    //lsp_debug("Init Wrapper Window");
                     return STATUS_OK;
                 }
-
-                // Register the window class.
-                const char CLASS_NAME[]  = "LSP_Window";
-                hInstance = GetCurrentModule();
-                WNDCLASSEXA wc = { };
-                wc.cbSize = sizeof(WNDCLASSEXA);
-                wc.lpfnWndProc   = WndProc;
-                wc.hInstance     = hInstance;
-                wc.lpszClassName = CLASS_NAME;
-                wc.style = 0;
-                wc.hbrBackground = (HBRUSH)COLOR_BACKGROUND+1;
-
-                // if (hInstance == NULL)
-                //     lsp_debug("MAIN hInstance is NULL");
 
                 DWORD dwStyle = WS_CHILD;
                 DWORD dwExStyle = 0;
@@ -217,32 +375,26 @@ namespace lsp
                 HWND ownerWnd = NULL;
 
                 if (hwndNative != NULL) {
-                    //lsp_debug("ROOT window is NOT NULL");
                     dwStyle = WS_CHILD;
                     ownerWnd = hwndNative;
-                    ATOM registerRes = RegisterClassExA(&wc);
-                    if (registerRes == 0) {
-                        DWORD errorReg = GetLastError();
-                        //lsp_debug("RegisterClass LAST ERROR %d", errorReg);
-                    }
                 } else if (hwndParent != NULL) {
-                    //lsp_debug("PARENT window is NOT NULL");
                     dwStyle = WS_CHILD;
                     ownerWnd = hwndParent;
                 } else {
-                    //lsp_debug("No ROOT or PARENT window");
                     dwStyle = WS_OVERLAPPEDWINDOW;
-                    ownerWnd = NULL;
+                    ownerWnd = hwndOwner;
                 }
 
                 // Calculate window constraints
                 calc_constraints(&sSize, &sSize);
 
+                WCHAR wndName[] = L"LSP Plugin";
+
                 // Create the window.
-                hwnd = CreateWindowExA(
+                hwnd = CreateWindowExW(
                     dwExStyle,          // Optional window styles.
-                    CLASS_NAME,         // Window class
-                    "LSP Plugin",       // Window text
+                    wndClsName,         // Window class
+                    wndName,       // Window text
                     dwStyle,            // Window style
 
                     // Size and position
@@ -256,21 +408,30 @@ namespace lsp
 
                 if (hwnd == NULL) {
                     DWORD errorwnd = GetLastError();
-                    //lsp_debug("CreateWindowExA LAST ERROR %ld", errorwnd);
                 } else {
-                    SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR) this);
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR) this);
                     pSurface = new Win32CairoSurface(static_cast<Win32Display *>(pDisplay), hwnd, 100, 100);
-                    lsp_debug("INIT surface created");
+                    tme.cbSize = sizeof(TRACKMOUSEEVENT);
+                    tme.dwFlags = TME_LEAVE;
+                    tme.dwHoverTime = HOVER_DEFAULT;
+                    tme.hwndTrack = hwnd;
                 }
+                set_mouse_pointer(MP_DEFAULT);
 
                 return STATUS_OK;
             }
 
             void Win32Window::do_destroy() {
                 //lsp_debug("DO_DESTROY");
+                // if (nFlags & F_GRABBING)
+                // {
+                //     static_cast<Win32Display *>(pDisplay)->ungrab_events(this);
+                //     nFlags &= ~F_GRABBING;
+                // }
                 set_handler(NULL);
                 if (hwnd != NULL) {
-                    SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR) 0);
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR) 0);
+                    SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOREDRAW | SWP_NOZORDER | SWP_NOACTIVATE);
                 }
                 hdc = NULL;
                 hwnd = NULL;
@@ -281,26 +442,25 @@ namespace lsp
 
             void Win32Window::destroy()
             {
-               // lsp_debug("DESTROY");
                 // Drop surface
                 if (hwnd != NULL) {
                     SetLastError(0);
-                    int res = SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR) 0);
+                    int res = SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR) 0);
                     if (res == 0) {
                         DWORD err = GetLastError();
-                        //lsp_debug("SetWindowLongPtrA error %d", err);
+                        lsp_debug("SetWindowLongPtrW error %ld", err);
                     }
-                    SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOREDRAW);
+                    SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOREDRAW | SWP_NOZORDER | SWP_NOACTIVATE);
                 }
                 hide();
                 drop_surface();
                 
                 if (hwnd != NULL) {
-                    //ReleaseDC(hwnd, hdc);
                     if (DestroyWindow(hwnd) == 0) {
                         DWORD res = GetLastError();
-                        //lsp_debug("DestroyWindow error %d", res);
+                        lsp_debug("DestroyWindow error %ld", res);
                     }
+                    GdiFlush();
                 }
 
                 if (pDisplay != NULL) {
@@ -369,24 +529,30 @@ namespace lsp
 
             status_t Win32Window::set_visibility(bool visible)
             {
-                //lsp_debug("set_visibility %d", visible);
                 return IWindow::set_visibility(visible);
             }
 
             size_t Win32Window::screen()
             {
-                return 1;
+                return nScreen;
             }
 
             status_t Win32Window::set_caption(const char *ascii, const char *utf8)
             {
-
+                if (hwnd != NULL) {
+                    size_t newsize = strlen(utf8) + 1;
+                    wchar_t* wcstring = new wchar_t[newsize];
+                    size_t convertedChars = 0;
+                    mbstowcs_s(&convertedChars, wcstring, newsize, utf8, _TRUNCATE);
+                    SetWindowTextW(hwnd, wcstring);
+                    delete []wcstring;
+                }
+                
                 return STATUS_OK;
             }
 
             void *Win32Window::handle()
             {
-                //lsp_debug("Window get hwnd");
                 return this->hwnd;
             }
 
@@ -399,53 +565,39 @@ namespace lsp
                 return STATUS_OK;
             } 
 
-            void Win32Window::handle_wm_move()
-            {
-                //lsp_debug("WM_MOVE");
-                event_t ue;
-                init_event(&ue);
-                ue.nType        = UIE_REDRAW;
-                ue.nLeft        = 0;
-                ue.nTop         = 0;
-                ue.nWidth       = sSize.nWidth;
-                ue.nHeight      = sSize.nHeight;
-                
-                if (!bWrapper) {
-                    if (pSurface != NULL) {
-                        static_cast<Win32CairoSurface *>(pSurface)->resize(sSize.nWidth, sSize.nHeight);
-                    }
-                }
-
-                handle_event(&ue);
-            }
-
-            void Win32Window::handle_mouse_move(bool down, POINT pt) {
-                size_t nState = 0;
-                if (GetCapture() == hwnd) {
-                    //printf("mouse move x %ld, y %ld\n", pt.x, pt.y);
-                    nState = MCF_LEFT;
-                }
+            void Win32Window::handle_mouse_move(POINT pt, size_t state) {
                 event_t ue;
                 ue.nType        = UIE_MOUSE_MOVE;
                 ue.nLeft        = pt.x;
                 ue.nTop         = pt.y;
-                ue.nState       = nState;
+                ue.nState       = state;
                 system::time_t ts;
                 system::get_time(&ts);
                 timestamp_t xts     = (timestamp_t(ts.seconds) * 1000);
                 ue.nTime        = xts;
+
                 handle_event(&ue);
             }
 
-            void Win32Window::handle_mouse_button(bool down, POINT pt) {
+            void Win32Window::handle_mouse_hover(bool enter, POINT pt) {
+                event_t ue;
+                init_event(&ue);
+                ue.nType        = enter ? UIE_MOUSE_IN : UIE_MOUSE_OUT;
+                ue.nLeft        = pt.x;
+                ue.nTop         = pt.y;
+                handle_event(&ue);
+            }
+
+            void Win32Window::handle_mouse_button(code_t button, size_t type, POINT pt, size_t state) {
 
                 event_t ue;
                 init_event(&ue);
-                ue.nCode        = MCB_LEFT;
-                ue.nType        = down ? UIE_MOUSE_DOWN : UIE_MOUSE_UP;
+                ue.nCode        = button;
+                ue.nType        = type;
                 ue.nLeft        = pt.x;
                 ue.nTop         = pt.y;
-                ue.nState       = MCF_LEFT;
+                size_t exState  = 1 << button;
+                ue.nState       = state | exState;
                 system::time_t ts;
                 system::get_time(&ts);
                 timestamp_t xts     = (timestamp_t(ts.seconds) * 1000);
@@ -457,8 +609,7 @@ namespace lsp
                 gen.nType       = UIE_UNKNOWN;
 
                 HWND lockedWindow = GetCapture();
-                if (down) {
-                    //lsp_debug("Capture mouse");
+                if (type == UIE_MOUSE_DOWN) {
                     SetCapture(hwnd);
                     // Shift the buffer and push event
                     vBtnEvent[0]            = vBtnEvent[1];
@@ -467,14 +618,13 @@ namespace lsp
                     init_event(&vBtnEvent[2].sUp);
                 } else {
                     if (hwnd == lockedWindow) {
-                        //lsp_debug("Release mouse capture");
                         ReleaseCapture();
                     }
                     // Push event
                     vBtnEvent[2].sUp        = ue;
                     if (check_click(&vBtnEvent[2]))
                     {
-                        gen.nType               = UIE_MOUSE_CLICK; // Crash on popup menu close : Bug ?
+                        gen.nType               = UIE_MOUSE_CLICK;
                         if (check_double_click(&vBtnEvent[1], &vBtnEvent[2]))
                         {
                             gen.nType               = UIE_MOUSE_DBL_CLICK;
@@ -483,25 +633,72 @@ namespace lsp
                         }
                     }
                 }  
+
                 IEventHandler *handler = pHandler;
+                Win32Display* dspl = static_cast<Win32Display *>(pDisplay);
+                Win32Window* src = this;
+
+                dspl->prepare_dispatch(src);
+
                 if (handler != NULL) {
                     handler->handle_event(&ue);
-                    // !!!!!! "this" can be deleted at this time !!!!!!
+                    // warning: *this Win32Window can be null at this time
                     // don't call member functions
                     if (gen.nType != UIE_UNKNOWN) {
                         handler->handle_event(&gen);
                     }
-                }  
+                } 
+
+                // let time to the window to handle the mouse event
+                ipc::Thread::sleep(1);
+
+                dspl->dispatch_event(src, &ue);
+                if (gen.nType != UIE_UNKNOWN) {
+                    dspl->dispatch_event(src, &gen);
+                }
+            }
+
+            void Win32Window::handle_mouse_scroll(int delta, POINT pt, size_t state) {
+                event_t ue;
+                init_event(&ue);
+                ue.nType        = UIE_MOUSE_SCROLL;
+                if (delta > 0) {
+                    ue.nCode        = MCD_UP;
+                    ue.nState       = state | MCF_BUTTON4;
+                } else if (delta < 0) {
+                    ue.nCode        = MCD_DOWN;
+                    ue.nState       = state | MCF_BUTTON5;
+                } else {
+                    return;
+                }
+                ue.nLeft        = pt.x;
+                ue.nTop         = pt.y;
+                system::time_t ts;
+                system::get_time(&ts);
+                timestamp_t xts     = (timestamp_t(ts.seconds) * 1000);
+                ue.nTime        = xts;
+
+                handle_event(&ue);
+            }
+
+            void Win32Window::handle_key(ui_event_type_t type) {
+
             }
 
             void Win32Window::handle_wm_paint() {
-                if (pSurface != NULL && windowVisible) {
+                if (pSurface != NULL && windowVisible) 
+                {
                     rendering = true;
                     PAINTSTRUCT paintStruct;
-                    HDC dc = BeginPaint (hwnd, &paintStruct);
-                    SetMapMode (dc, MM_TEXT);
+                    HDC dc = BeginPaint(hwnd, &paintStruct);
+                    
+                    SetMapMode(dc, MM_TEXT);
+
+                    // Clip child windows rectangles
                     ClipInfo clipInfo = { dc, this };
-                    EnumChildWindows (hwnd, clipChildWindowCallback, (LPARAM) &clipInfo);
+                    EnumChildWindows(hwnd, clipChildWindowCallback, (LPARAM) &clipInfo);
+
+                    // Clip window border
                     if (hwndParent != NULL) {
                         RECT rect;
                         GetWindowRect(hwnd, &rect);
@@ -510,15 +707,17 @@ namespace lsp
                         MapWindowPoints(HWND_DESKTOP, hwnd, (LPPOINT) &rect, 2);
                         IntersectClipRect(dc, rect.left, rect.top, rect.right, rect.bottom);
                     }
-                    static_cast<Win32CairoSurface *>(pSurface)->renderOffscreen(dc, paintStruct, sSize.nWidth, sSize.nHeight);
-                    EndPaint (hwnd, &paintStruct);
+
+                    // Render on screen
+                    static_cast<Win32CairoSurface *>(pSurface)->renderOffscreen(dc, sSize.nWidth, sSize.nHeight);
+                    EndPaint(hwnd, &paintStruct);
+                    
                     rendering = false;
                 }
             }
 
             void Win32Window::handle_wm_size(UINT left, UINT right, UINT width, UINT height)
             {
-                //lsp_debug("WM_SIZE x %d, y %d width %d, height %d", left, right, width, height);
                 event_t ue;
                 init_event(&ue);
                 ue.nType        = UIE_RESIZE;
@@ -526,6 +725,11 @@ namespace lsp
                 ue.nTop         = right;
                 ue.nWidth       = width;
                 ue.nHeight      = height;
+
+                sSize.nLeft = left;
+                sSize.nTop = right;
+                sSize.nWidth = width;
+                sSize.nHeight = height;
                 
                 if (!bWrapper) { 
                     if (pSurface != NULL) {
@@ -536,12 +740,16 @@ namespace lsp
             }
 
             void Win32Window::handle_wm_hide() {
-                //lsp_debug("WM_HIDE");
                 event_t ue;
                 init_event(&ue);
                 ue.nType        = UIE_HIDE;
 
                 windowVisible = false;
+                // if (nFlags & F_GRABBING)
+                // {
+                //     static_cast<Win32Display *>(pDisplay)->ungrab_events(this);
+                //     nFlags &= ~F_GRABBING;
+                // }
                 drop_surface();
 
                 handle_event(&ue);
@@ -549,7 +757,6 @@ namespace lsp
 
             void Win32Window::handle_wm_create()
             {
-                //lsp_debug("WM_SHOW");
                 event_t ue;
                 init_event(&ue);
                 ue.nType        = UIE_SHOW;
@@ -562,28 +769,55 @@ namespace lsp
                 handle_event(&ue);
             }
 
-            void Win32Window::updateLayeredWindow() {
+            void Win32Window::handle_wm_focus(bool focused) {
+                event_t ue;
+                init_event(&ue);
+                ue.nType        = focused ? UIE_FOCUS_IN : UIE_FOCUS_OUT;
+                handle_event(&ue);
             }
 
             status_t Win32Window::move(ssize_t left, ssize_t top)
             {
-                //lsp_debug("left : %ld, top : %ld", left, top);
+                //lsp_debug("move => left : %ld, top : %ld", left, top);
                 sSize.nLeft    = left;
                 sSize.nTop   = top;
                 if (!bWrapper) {
-                    MoveWindow(hwnd,sSize.nLeft,sSize.nTop,sSize.nWidth,sSize.nHeight,TRUE);
+                    WINDOWINFO wndInfo;
+                    wndInfo.cbSize = sizeof(WINDOWINFO);
+                    GetWindowInfo(hwnd, &wndInfo);
+                    UINT extraWidth = (wndInfo.rcClient.left - wndInfo.rcWindow.left) + (wndInfo.rcWindow.right - wndInfo.rcClient.right);
+                    UINT extraHeight = (wndInfo.rcClient.top - wndInfo.rcWindow.top) + (wndInfo.rcWindow.bottom - wndInfo.rcClient.bottom);
+                    if (hwndNative == NULL && hwndParent == NULL) {
+                        SetWindowPos(hwnd, NULL, rootWndPos.x, rootWndPos.y, sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
+                    } else {
+                        SetWindowPos(hwnd, NULL,sSize.nLeft,sSize.nTop,sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
                 }
                 return STATUS_OK;
             }
 
             status_t Win32Window::resize(ssize_t width, ssize_t height)
             {
-                //lsp_debug("width : %ld, height : %ld", width, height);
+                //lsp_debug("resize => width : %ld, height : %ld", width, height);
                 sSize.nWidth    = width;
                 sSize.nHeight   = height;
+
+                int screenWidth = GetSystemMetrics(SM_CXSCREEN); 
+                rootWndPos.x = (screenWidth - sSize.nWidth ) / 2;
+                int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+                rootWndPos.y = (screenHeight - sSize.nHeight ) / 2;
+
                 if (!bWrapper) {
-                    //SetWindowPos(hwnd, NULL,sSize.nLeft,sSize.nTop,sSize.nWidth,sSize.nHeight,SWP_NOREDRAW | SWP_NOSENDCHANGING);
-                    MoveWindow(hwnd,sSize.nLeft,sSize.nTop,sSize.nWidth,sSize.nHeight,TRUE);
+                    WINDOWINFO wndInfo;
+                    wndInfo.cbSize = sizeof(WINDOWINFO);
+                    GetWindowInfo(hwnd, &wndInfo);
+                    UINT extraWidth = (wndInfo.rcClient.left - wndInfo.rcWindow.left) + (wndInfo.rcWindow.right - wndInfo.rcClient.right);
+                    UINT extraHeight = (wndInfo.rcClient.top - wndInfo.rcWindow.top) + (wndInfo.rcWindow.bottom - wndInfo.rcClient.bottom);
+                    if (hwndNative == NULL && hwndParent == NULL) {
+                        SetWindowPos(hwnd, NULL, rootWndPos.x, rootWndPos.y, sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
+                    } else {
+                        SetWindowPos(hwnd, NULL,sSize.nLeft,sSize.nTop,sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
                 }
                 return STATUS_OK;
             }
@@ -600,38 +834,22 @@ namespace lsp
                     return STATUS_OK;
 
                 //lsp_debug("left=%d, top=%d, width=%d, height=%d", int(sSize.nLeft), int(sSize.nTop), int(sSize.nWidth), int(sSize.nHeight));
-                //MoveWindow(hwnd,sSize.nLeft,sSize.nTop,sSize.nWidth,sSize.nHeight,FALSE);
-                SetWindowPos(hwnd, NULL, sSize.nLeft, sSize.nTop, sSize.nWidth, sSize.nHeight, SWP_NOREDRAW | SWP_NOSENDCHANGING);
-
-
-                // if (hwndParent != NULL)
-                // {
-                //     if ((old.nWidth == sSize.nWidth) &&
-                //         (old.nHeight == sSize.nHeight))
-                //         return STATUS_OK;
-
-                //     //SetWindowPos(hwnd, NULL, 0, 0, sSize.nWidth, sSize.nHeight, SWP_NOREDRAW | SWP_NOSENDCHANGING);
-                //     MoveWindow(hwnd,sSize.nLeft,sSize.nTop,sSize.nWidth,sSize.nHeight,FALSE);
-                // }
-                // else
-                // {
-                //     if ((old.nLeft == sSize.nLeft) &&
-                //         (old.nTop == sSize.nTop) &&
-                //         (old.nWidth == sSize.nWidth) &&
-                //         (old.nHeight == sSize.nHeight))
-                //         return STATUS_OK;
-
-                //     //SetWindowPos(hwnd, NULL,sSize.nLeft,sSize.nTop,sSize.nWidth,sSize.nHeight,SWP_NOREDRAW | SWP_NOSENDCHANGING);
-                //     MoveWindow(hwnd,sSize.nLeft,sSize.nTop,sSize.nWidth,sSize.nHeight,FALSE);
-                // }
-
+                WINDOWINFO wndInfo;
+                    wndInfo.cbSize = sizeof(WINDOWINFO);
+                    GetWindowInfo(hwnd, &wndInfo);
+                UINT extraWidth = (wndInfo.rcClient.left - wndInfo.rcWindow.left) + (wndInfo.rcWindow.right - wndInfo.rcClient.right);
+                    UINT extraHeight = (wndInfo.rcClient.top - wndInfo.rcWindow.top) + (wndInfo.rcWindow.bottom - wndInfo.rcClient.bottom);
+                if (hwndNative == NULL && hwndParent == NULL) {
+                    SetWindowPos(hwnd, NULL, rootWndPos.x, rootWndPos.y, sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
+                } else {
+                    SetWindowPos(hwnd, NULL,sSize.nLeft,sSize.nTop,sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
                 return STATUS_OK;
             }
 
             status_t Win32Window::set_border_style(border_style_t style)
             {
                 enBorderStyle = style;
-                //lsp_debug("set border style");
                 return STATUS_OK;
             }
 
@@ -668,11 +886,16 @@ namespace lsp
             status_t Win32Window::hide()
             {
                 windowVisible = false;
+                if (nFlags & F_GRABBING)
+                {
+                    static_cast<Win32Display *>(pDisplay)->ungrab_events(this);
+                    nFlags &= ~F_GRABBING;
+                }
                 if (hwnd == NULL) {
                     return STATUS_BAD_STATE;
                 }
                 if (hwnd != NULL && pSurface != NULL) {
-                    ShowWindow(this->hwnd, SW_HIDE);
+                    SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_HIDEWINDOW | SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
                 }
                 return STATUS_OK;
             }
@@ -687,20 +910,30 @@ namespace lsp
                 if (windowVisible)
                     return STATUS_OK;
                 if (hwnd == NULL) {
-                    //lsp_debug("BAD STATE");
                     return STATUS_BAD_STATE;
                 }
+                if (pSurface == NULL) {
+                    pSurface = new Win32CairoSurface(static_cast<Win32Display *>(pDisplay), hwnd, sSize.nWidth, sSize.nHeight);
+                }
                 ShowWindow(this->hwnd, SW_SHOWNORMAL);
+                if (hwndOwner != NULL) {
+                    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    SetForegroundWindow(hwnd);
+                }
                 return STATUS_OK;
             }
 
             status_t Win32Window::set_left(ssize_t left)
             {
+                int screenWidth = GetSystemMetrics(SM_CXSCREEN); 
+                rootWndPos.x = (screenWidth - sSize.nWidth ) / 2;
                 return move(left, sSize.nTop);
             }
 
             status_t Win32Window::set_top(ssize_t top)
             {
+                int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+                rootWndPos.y = (screenHeight - sSize.nHeight ) / 2;
                 return move(sSize.nLeft, top);
             }
 
@@ -723,8 +956,25 @@ namespace lsp
                     sConstraints.nMinHeight = 1;
 
                 calc_constraints(&sSize, &sSize);
-                //SetWindowPos(hwnd, NULL, 0, 0, sSize.nWidth, sSize.nHeight, SWP_NOREDRAW | SWP_NOSENDCHANGING);
-                MoveWindow(hwnd,sSize.nLeft,sSize.nTop,sSize.nWidth,sSize.nHeight,TRUE);
+                
+                RECT rect;
+                GetClientRect(hwnd, &rect);
+
+                if (sSize.nWidth != (rect.right - rect.left) || sSize.nHeight != (rect.bottom - rect.top)) {
+
+                    WINDOWINFO wndInfo;
+                    wndInfo.cbSize = sizeof(WINDOWINFO);
+                    GetWindowInfo(hwnd, &wndInfo);
+
+                    UINT extraWidth = (wndInfo.rcClient.left - wndInfo.rcWindow.left) + (wndInfo.rcWindow.right - wndInfo.rcClient.right);
+                    UINT extraHeight = (wndInfo.rcClient.top - wndInfo.rcWindow.top) + (wndInfo.rcWindow.bottom - wndInfo.rcClient.bottom);
+
+                    if (hwndNative == NULL && hwndParent == NULL) {
+                        SetWindowPos(hwnd, NULL, rootWndPos.x, rootWndPos.y, sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
+                    } else {
+                        SetWindowPos(hwnd, NULL,sSize.nLeft,sSize.nTop,sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
+                    }
+                }
                 return STATUS_OK;
             }
 
@@ -744,18 +994,40 @@ namespace lsp
 
                 //lsp_debug("width=%d, height=%d", int(sSize.nWidth), int(sSize.nHeight));
 
-                //SetWindowPos(hwnd, NULL, 0, 0, sSize.nWidth, sSize.nHeight, SWP_NOREDRAW | SWP_NOSENDCHANGING);
-                MoveWindow(hwnd,sSize.nLeft,sSize.nTop,sSize.nWidth,sSize.nHeight,TRUE);
+                WINDOWINFO wndInfo;
+                wndInfo.cbSize = sizeof(WINDOWINFO);
+                GetWindowInfo(hwnd, &wndInfo);
+                UINT extraWidth = (wndInfo.rcClient.left - wndInfo.rcWindow.left) + (wndInfo.rcWindow.right - wndInfo.rcClient.right);
+                UINT extraHeight = (wndInfo.rcClient.top - wndInfo.rcWindow.top) + (wndInfo.rcWindow.bottom - wndInfo.rcClient.bottom);
+                if (hwndNative == NULL && hwndParent == NULL) {
+                    SetWindowPos(hwnd, NULL, rootWndPos.x, rootWndPos.y, sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
+                } else {
+                    SetWindowPos(hwnd, NULL,sSize.nLeft,sSize.nTop,sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
                 return STATUS_OK;
             }
 
             status_t Win32Window::set_focus(bool focus)
             {
+                if (hwnd != NULL) {
+                    if (focus) {
+                        SetFocus(hwnd);
+                    } else if (GetFocus() == hwnd) {
+                        SetFocus(NULL);
+                    }
+                }
                 return STATUS_OK;
             }
 
             status_t Win32Window::toggle_focus()
             {
+                if (hwnd != NULL) {
+                    if (GetFocus() == hwnd) {
+                        SetFocus(NULL);
+                    } else {
+                        SetFocus(hwnd);
+                    }
+                }
                 return STATUS_OK;
             }
 
@@ -774,41 +1046,45 @@ namespace lsp
 
             status_t Win32Window::set_window_actions(size_t actions)
             {
+                nActions            = actions;
                 return STATUS_OK;
             }
 
             status_t Win32Window::set_mouse_pointer(mouse_pointer_t pointer)
             {
+                if (hwnd == NULL)
+                    return STATUS_BAD_STATE;
+
+                HANDLE cur = static_cast<Win32Display *>(pDisplay)->get_cursor(pointer);
+                if (cur == NULL)
+                    return STATUS_UNKNOWN_ERR;
+
+                SetCursor((HCURSOR)cur);
+                
+                enPointer = pointer;
                 return STATUS_OK;
             }
 
             mouse_pointer_t Win32Window::get_mouse_pointer()
             {
-                return MP_ARROW;
+                return enPointer;
             }
 
             status_t Win32Window::grab_events(grab_t group)
             {
-               switch (group)
+                if (!(nFlags & F_GRABBING))
                 {
-                    case GRAB_DROPDOWN:
-                    case GRAB_MENU:
-                    case GRAB_EXTRA_MENU:
-                        //SetCapture(hwnd);
-                        break;
-                    default:
-                        break;
+                    static_cast<Win32Display *>(pDisplay)->grab_events(this, group);
+                    nFlags |= F_GRABBING;
                 }
                 return STATUS_OK;
             }
 
             status_t Win32Window::ungrab_events()
             {
-                HWND grabbedWindow = GetCapture();
-                if (grabbedWindow == hwnd) {
-                    //ReleaseCapture();
-                }
-                return STATUS_OK;
+                if (!(nFlags & F_GRABBING))
+                    return STATUS_NO_GRAB;
+                return static_cast<Win32Display *>(pDisplay)->ungrab_events(this);
             }
 
             bool Win32Window::check_click(const btn_event_t *ev)
@@ -865,6 +1141,25 @@ namespace lsp
                 //lsp_debug("set_role %s", wrole);
 
                 return STATUS_OK;
+            }
+
+            size_t Win32Window::decode_mouse_state(size_t vKey)
+            {
+                size_t result = 0;
+                #define DC(mask, flag)  \
+                    if (vKey & mask) \
+                        result |= flag; \
+
+                DC(MK_SHIFT, MCF_SHIFT);
+                DC(MK_CONTROL, MCF_CONTROL);
+                DC(MK_ALT, MCF_ALT);
+                DC(MK_LBUTTON, MCF_LEFT);
+                DC(MK_MBUTTON, MCF_MIDDLE);
+                DC(MK_RBUTTON, MCF_RIGHT);
+
+                #undef DC
+
+                return result;
             }
         }
     }

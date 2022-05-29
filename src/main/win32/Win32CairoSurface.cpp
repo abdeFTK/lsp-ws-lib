@@ -11,8 +11,7 @@
 #include <private/win32/Win32CairoGradient.h>
 #include <private/win32/Win32CairoSurface.h>
 
-#define PELS_72DPI  ((LONG)(72. / 0.0254))
-
+#define PELS_96DPI  ((LONG)(96. / 0.0254))
 
 namespace lsp
 {
@@ -40,8 +39,9 @@ namespace lsp
                 pHdc            = NULL;
                 pWnd            = wnd;
                 rendering = false;
-                pSurface        = ::cairo_win32_surface_create_with_dib(CAIRO_FORMAT_ARGB32, width, height);
-                //resize(0,0);
+                HDC dc = GetDC(pWnd);
+                pSurface        = ::cairo_win32_surface_create_with_ddb(dc, CAIRO_FORMAT_ARGB32, width, height);
+                ReleaseDC(pWnd, dc);
             }
 
             Win32CairoSurface::Win32CairoSurface(Win32Display *dpy, size_t width, size_t height):
@@ -53,13 +53,14 @@ namespace lsp
                 pHdc            = NULL;
                 pWnd            = NULL;
                 rendering = false;
-                pSurface        = ::cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
-                nStride         = cairo_image_surface_get_stride(pSurface);
+                //pSurface        = ::cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+                pSurface  = ::cairo_win32_surface_create_with_dib(CAIRO_FORMAT_ARGB32, width, height);
+                cairo_surface_t* imageSurface        = cairo_win32_surface_get_image(pSurface);
+                nStride         = cairo_image_surface_get_stride(imageSurface);
             }
 
             ISurface *Win32CairoSurface::create(size_t width, size_t height)
             {
-                //lsp_debug("CREATE SURFACE CALLED");
                 return new Win32CairoSurface(pDisplay, width, height);
             }
 
@@ -69,7 +70,6 @@ namespace lsp
                 if (s == NULL)
                     return NULL;
 
-                //lsp_debug("DEBUG");
                 // Draw one surface on another
                 s->begin();
                     ::cairo_set_source_surface(s->pCR, pSurface, 0.0f, 0.0f);
@@ -81,25 +81,21 @@ namespace lsp
 
             IGradient *Win32CairoSurface::linear_gradient(float x0, float y0, float x1, float y1)
             {
-                //lsp_debug("DEBUG");
                 return new Win32CairoLinearGradient(x0, y0, x1, y1);
             }
 
             IGradient *Win32CairoSurface::radial_gradient(float cx0, float cy0, float r0, float cx1, float cy1, float r1)
             {
-                //lsp_debug("DEBUG");
                 return new Win32CairoRadialGradient(cx0, cy0, r0, cx1, cy1, r1);
             }
 
             Win32CairoSurface::~Win32CairoSurface()
             {
-                //lsp_debug("DEBUG");
                 destroy_context();
             }
 
             void Win32CairoSurface::destroy_context()
             {
-                bitmapData = NULL;
                 if (pFO != NULL)
                 {
                     cairo_font_options_destroy(pFO);
@@ -131,8 +127,6 @@ namespace lsp
                     int offwidth = cairo_image_surface_get_width(offSurface);
                     int offheight = cairo_image_surface_get_height(offSurface);
 
-                    //lsp_debug("Sync surface Size : oldWidth %ld, oldHeight %ld, width %ld, height %ld", offwidth, offheight, nWidth, nHeight);
-
                     return (offwidth == nWidth && offheight == nHeight);
                 }
                 return false;
@@ -141,20 +135,13 @@ namespace lsp
             bool Win32CairoSurface::syncSize() {
                 if (nType != ST_IMAGE && pSurface != NULL)
                 {
-                    // cairo_surface_t* offSurface = cairo_win32_surface_get_image(pSurface);
-                    // if (offSurface == NULL) {
-                    //     return false;
-                    // }
-                    // int offwidth = cairo_image_surface_get_width(offSurface);
-                    // int offheight = cairo_image_surface_get_height(offSurface);
-
-                    //lsp_debug("Sync surface Size : oldWidth %ld, oldHeight %ld, width %ld, height %ld", offwidth, offheight, nWidth, nHeight);
-
                     if (!sizeSynced()) {
                         cairo_surface_t* oldSurf = pSurface;
                         cairo_t* oldCr = pCR;
                         pCR = NULL;
-                        pSurface        = ::cairo_win32_surface_create_with_dib(CAIRO_FORMAT_ARGB32, nWidth, nHeight);
+                        HDC dc = GetDC(pWnd);
+                        pSurface        = ::cairo_win32_surface_create_with_ddb(dc, CAIRO_FORMAT_ARGB32, nWidth, nHeight);
+                        ReleaseDC(pWnd, dc);
 
                         if (oldCr != NULL)
                         {
@@ -174,19 +161,16 @@ namespace lsp
 
             bool Win32CairoSurface::resize(size_t width, size_t height)
             {
-                nWidth = width;
-                nHeight = height;
                 if (nType == ST_IMAGE)
                 {
-                    int offwidth = cairo_image_surface_get_width(pSurface);
-                    int offheight = cairo_image_surface_get_height(pSurface);
-
-                    //lsp_debug("Sync surface Size : oldWidth %ld, oldHeight %ld, width %ld, height %ld", offwidth, offheight, nWidth, nHeight);
+                    cairo_surface_t *w32ImageSurface = cairo_win32_surface_get_image(pSurface);
+                    int offwidth = cairo_image_surface_get_width(w32ImageSurface);
+                    int offheight = cairo_image_surface_get_height(w32ImageSurface);
 
                     if (offwidth != nWidth || offheight != nHeight) {
 
-                        // Create new surface and cairo
-                        cairo_surface_t *s  = ::cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+                        cairo_surface_t* imageSurface  = ::cairo_win32_surface_create_with_dib(CAIRO_FORMAT_ARGB32, width, height);
+                        cairo_surface_t *s        = cairo_win32_surface_get_image(imageSurface);
                         if (s == NULL)
                             return false;
                         cairo_t *cr         = ::cairo_create(s);
@@ -215,52 +199,14 @@ namespace lsp
 
                     }
                 } else {
-                    // if (pSurface != NULL) {
-                    //     // HDC sDC = cairo_win32_surface_get_dc(pSurface);
-                    //     // ValidateRect(static_cast<Win32Display *>(pDisplay)->hRootWnd,NULL);
-                    //     // ValidateRgn(static_cast<Win32Display *>(pDisplay)->hRootWnd,NULL);
-                    //     // RECT rc;
-                    //     // GetWindowRect(static_cast<Win32Display *>(pDisplay)->hRootWnd, &rc); 
-                    //     // SetMapMode(sDC, MM_ANISOTROPIC); 
-                    //     // SetWindowExtEx(sDC,  rc.right, rc.bottom, NULL); 
-                    //     // SetViewportExtEx(sDC, rc.right, rc.bottom, NULL); 
-                    //     ::cairo_surface_flush(pSurface);
-                    //     cairo_surface_mark_dirty(pSurface);
-                    // }
-
-
-
-
-
-                    // cairo_surface_t* offSurface = cairo_win32_surface_get_image(pSurface);
-                    // int offwidth = cairo_image_surface_get_width(offSurface);
-                    // int offheight = cairo_image_surface_get_width(offSurface);
-
-                    // if (offwidth != width || offheight != height) {
-                    //     cairo_surface_t* oldSurf = pSurface;
-                    //     cairo_t* oldCr = pCR;
-                    //     pCR = NULL;
-                    //     pSurface        = ::cairo_win32_surface_create_with_dib(CAIRO_FORMAT_ARGB32, width, height);
-
-                    //     if (oldCr != NULL)
-                    //     {
-                    //         cairo_destroy(oldCr);
-                    //         oldCr             = NULL;
-                    //     }
-                    //     if (oldSurf != NULL)
-                    //     {
-                    //         cairo_surface_destroy(oldSurf);
-                    //         oldSurf = NULL;
-                    //     }
-                    // }
-                    
+                    nWidth = width;
+                    nHeight = height;
                 }
                 return true;
             }
 
             void Win32CairoSurface::draw(ISurface *s, float x, float y)
             {
-                //lsp_debug("DEBUG");
                 surface_type_t type = s->type();
                 // if ((type != ST_XLIB) && (type != ST_IMAGE))
                 //     return;
@@ -269,8 +215,6 @@ namespace lsp
                 Win32CairoSurface *cs = static_cast<Win32CairoSurface *>(s);
                 if (cs->pSurface == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 // Draw one surface on another
                 ::cairo_set_source_surface(pCR, cs->pSurface, x, y);
@@ -279,7 +223,6 @@ namespace lsp
 
             void Win32CairoSurface::draw(ISurface *s, float x, float y, float sx, float sy)
             {
-                //lsp_debug("DEBUG");
                 surface_type_t type = s->type();
                 // if ((type != ST_XLIB) && (type != ST_IMAGE))
                 //     return;
@@ -288,9 +231,6 @@ namespace lsp
                 Win32CairoSurface *cs = static_cast<Win32CairoSurface *>(s);
                 if (cs->pSurface == NULL)
                     return;
-
-
-                //lsp_debug("DEBUG");
 
                 // Draw one surface on another
                 ::cairo_save(pCR);
@@ -316,8 +256,6 @@ namespace lsp
                 if (cs->pSurface == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 // Draw one surface on another
                 ::cairo_save(pCR);
                 if (sx < 0.0f)
@@ -342,8 +280,6 @@ namespace lsp
                 if (cs->pSurface == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 // Draw one surface on another
                 ::cairo_save(pCR);
                 ::cairo_translate(pCR, x, y);
@@ -365,8 +301,6 @@ namespace lsp
                 if (cs->pSurface == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 // Draw one surface on another
                 ::cairo_save(pCR);
                 ::cairo_set_source_surface(pCR, cs->pSurface, x - sx, y - sy);
@@ -377,13 +311,9 @@ namespace lsp
 
             void Win32CairoSurface::begin()
             {
-                //lsp_debug("begin");
                 // Force end() call
-                //end();
                 syncSize();
-                //lsp_debug("synced");
                 endWithoutUpdate();
-                //lsp_debug("endWithoutUpdate");
 
                 if (!rendering) {
                 // Create cairo objects
@@ -396,8 +326,6 @@ namespace lsp
                 pFO             = ::cairo_font_options_create();
                 if (pFO == NULL)
                     return;
-
-                ////lsp_debug("DEBUG");
 
                 // Initialize settings
                 ::cairo_set_antialias(pCR, CAIRO_ANTIALIAS_DEFAULT);
@@ -418,106 +346,38 @@ namespace lsp
                     cairo_destroy(pCR);
                     pCR             = NULL;
                 }
-
-                // ////lsp_debug("DEBUG");
-                // if (!rendering && nType != ST_IMAGE) {
-                //     cairo_surface_t* offSurface = cairo_win32_surface_get_image(pSurface);
-                //     if (offSurface == NULL) {
-                //         return;
-                //     }
-                //     bitmapData = reinterpret_cast<uint8_t *>(cairo_image_surface_get_data(offSurface));
-                //     ::cairo_surface_flush(pSurface);
-                //     //cairo_surface_mark_dirty(pSurface);
-                // } else if (nType != ST_IMAGE) {
-                //     lsp_debug("ALREADY RENDERING");
-                // }
-                // if (nType == ST_IMAGE) {
                 if (pSurface != NULL) {
                     ::cairo_surface_flush(pSurface);
+                    // cairo_surface_mark_dirty(pSurface);
                 }
-                    
-                //}
             }
 
-            void Win32CairoSurface::renderOffscreen(HDC dc, PAINTSTRUCT& paintStruct, int width, int height) {
-                if (pSurface != NULL && bitmapData != NULL && sizeSynced()) {
+            void Win32CairoSurface::renderOffscreen(HDC dc, int width, int height) {
+                if (pSurface != NULL) {
 
-                    int x = paintStruct.rcPaint.left;
-                    int y = paintStruct.rcPaint.top;
-                    int w = paintStruct.rcPaint.right - x;
-                    int h = paintStruct.rcPaint.bottom - y;
-                    
-                    // int imageWidth = cairo_image_surface_get_width(pSurface);
-                    // int imageHeight = cairo_image_surface_get_height(pSurface);
-                    // cairo_surface_t* offSurface = cairo_win32_surface_get_image(pSurface);
-                    // uint8_t * bitmapData = reinterpret_cast<uint8_t *>(cairo_image_surface_get_data(offSurface));
-
-                    //SetMapMode (dc, MM_TEXT);
-
-                    memset(&bitmap_info, 0, sizeof(bitmap_info));
-                    bitmap_info.bV4Size     = sizeof (BITMAPV4HEADER);
-                    bitmap_info.bV4Width = width == 0 ? 1 : width;
-                    bitmap_info.bV4Height = height == 0 ? -1 : - height; /* top-down */
-                    bitmap_info.bV4CSType = 1;
-                    bitmap_info.bV4BitCount = 32;
-                    bitmap_info.bV4Planes = 1;
-                    bitmap_info.bV4AlphaMask      = 0xff000000;
-                    bitmap_info.bV4RedMask        = 0xff0000;
-                    bitmap_info.bV4GreenMask      = 0xff00;
-                    bitmap_info.bV4BlueMask       = 0xff;
-                    bitmap_info.bV4V4Compression  = BI_BITFIELDS;
-
-                    // rendering = true;
-                    // // uint8_t               bitmapCopy;
-                    // memset(bitmapCopy, 0, sizeof(bitmapData));
-                    // memcpy(bitmapCopy, bitmapData, sizeof(bitmapCopy));
-                    // rendering = false;
-
-                    // RGBQUAD bmiColors[2];
-
-                    // bitmap_info.bmiColors = &bmiColors;
-              
-              
                     rendering = true;
-                    int renderRes = StretchDIBits(dc, 0, 0, width, height, 0, 0, width, height, bitmapData, (const BITMAPINFO*) &bitmap_info, DIB_RGB_COLORS, SRCCOPY);
+
+                    cairo_surface_flush(pSurface);
+                    // cairo_surface_mark_dirty(pSurface);
+                    HDC offDc = cairo_win32_surface_get_dc(pSurface);
+                    BitBlt(dc, 0, 0, width, height, offDc, 0, 0, SRCCOPY);
+
                     rendering = false;
-                    
-                    // if (renderRes == 0) {
-                    //     lsp_debug("StretchDIBits failed. bitmap size : %ld", sizeof(bitmapData));
-                    // } else {
-                    //     lsp_debug("StretchDIBits SUCCESS");
-                    // }
                 }
             }
 
             void Win32CairoSurface::end()
             {
-                ////lsp_debug("DEBUG");
-                if (!rendering && nType != ST_IMAGE) {
-                    //lsp_debug("cairo_win32_surface_get_image");
-                    cairo_surface_t* offSurface = cairo_win32_surface_get_image(pSurface);
-                    if (offSurface != NULL) {
-                        bitmapData = reinterpret_cast<uint8_t *>(cairo_image_surface_get_data(offSurface));
-                        //::cairo_surface_flush(pSurface);
-                        //cairo_surface_mark_dirty(pSurface);
-                        //lsp_debug("get bitmapData");
-                    }
-                } else if (nType != ST_IMAGE) {
-                    lsp_debug("ALREADY RENDERING");
-                }
                 endWithoutUpdate();
-               // if (!rendering) {
-                if (nType != ST_IMAGE && !syncSize()) {
+                
+                if (nType != ST_IMAGE) {
                     InvalidateRect(pWnd, NULL, false);
-                }
-                    //InvalidateRgn(pWnd, NULL, false);
                     //UpdateWindow(pWnd);
-               // }
+                }
             }
 
             void Win32CairoSurface::clear_rgb(uint32_t rgb)
             {
-                //lsp_debug("DEBUG");
                 clear_rgba(rgb & 0xffffff);
             }
 
@@ -525,8 +385,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-                    
-                //lsp_debug("DEBUG");
 
                 cairo_operator_t op = cairo_get_operator(pCR);
                 ::cairo_set_operator (pCR, CAIRO_OPERATOR_SOURCE);
@@ -545,7 +403,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
                 
-                //lsp_debug("DEBUG");
                 ::cairo_set_source_rgb(pCR, col.red(), col.green(), col.blue());
             }
 
@@ -554,7 +411,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
                 ::cairo_set_source_rgba(pCR, col.red(), col.green(), col.blue(), 1.0f - col.alpha());
             }
 
@@ -562,8 +418,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 setSourceRGBA(color);
                 cairo_operator_t op = ::cairo_get_operator(pCR);
@@ -577,8 +431,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 setSourceRGBA(color);
                 ::cairo_rectangle(pCR, left, top, width, height);
                 ::cairo_fill(pCR);
@@ -588,8 +440,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 Win32CairoGradient *cg = static_cast<Win32CairoGradient *>(g);
                 cg->apply(pCR);
@@ -601,8 +451,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 setSourceRGBA(color);
                 double w = cairo_get_line_width(pCR);
@@ -616,8 +464,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 Win32CairoGradient *cg = static_cast<Win32CairoGradient *>(g);
                 cg->apply(pCR);
@@ -633,8 +479,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 radius = lsp_max(0.0f, radius);
                 const float xmax = xmin + width;
@@ -671,8 +515,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 setSourceRGBA(color);
                 double w = cairo_get_line_width(pCR);
                 cairo_set_line_width(pCR, line_width);
@@ -685,8 +527,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 Win32CairoGradient *cg = static_cast<Win32CairoGradient *>(g);
 
@@ -703,8 +543,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 setSourceRGBA(color);
                 double w = cairo_get_line_width(pCR);
                 float lw2 = line_width * 0.5f;
@@ -718,8 +556,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 Win32CairoGradient *cg = static_cast<Win32CairoGradient *>(g);
 
@@ -736,8 +572,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 setSourceRGBA(color);
                 drawRoundRect(left, top, width, height, radius, mask);
@@ -758,8 +592,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 Win32CairoGradient *cg = static_cast<Win32CairoGradient *>(g);
                 cg->apply(pCR);
                 drawRoundRect(left, top, width, height, radius, mask);
@@ -771,8 +603,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 Win32CairoGradient *cg = static_cast<Win32CairoGradient *>(g);
                 cg->apply(pCR);
                 drawRoundRect(r->nLeft, r->nTop, r->nWidth, r->nHeight, radius, mask);
@@ -783,8 +613,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 setSourceRGBA(color);
                 cairo_set_line_width(pCR, line_width);
@@ -798,8 +626,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 setSourceRGBA(color);
                 cairo_move_to(pCR, cx, cy);
                 cairo_arc(pCR, cx, cy, radius, angle1, angle2);
@@ -811,8 +637,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 Win32CairoGradient *cg = static_cast<Win32CairoGradient *>(g);
                 cg->apply(pCR);
@@ -827,8 +651,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 setSourceRGBA(color);
                 cairo_move_to(pCR, x0, y0);
@@ -1072,8 +894,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 double ow = cairo_get_line_width(pCR);
                 cairo_line_cap_t cap = cairo_get_line_cap(pCR);
                 setSourceRGBA(color);
@@ -1090,8 +910,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 double ow = cairo_get_line_width(pCR);
                 cairo_line_cap_t cap = cairo_get_line_cap(pCR);
@@ -1110,8 +928,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 double ow = cairo_get_line_width(pCR);
                 setSourceRGBA(color);
                 cairo_set_line_width(pCR, width);
@@ -1125,8 +941,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 Win32CairoGradient *cg = static_cast<Win32CairoGradient *>(g);
                 cg->apply(pCR);
@@ -1143,8 +957,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 double ow = cairo_get_line_width(pCR);
                 setSourceRGBA(color);
@@ -1170,8 +982,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 double ow = cairo_get_line_width(pCR);
                 setSourceRGBA(color);
                 cairo_set_line_width(pCR, width);
@@ -1196,8 +1006,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 Win32CairoGradient *cg = static_cast<Win32CairoGradient *>(gr);
                 cg->apply(pCR);
@@ -1233,8 +1041,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 double ow = cairo_get_line_width(pCR);
                 setSourceRGBA(color);
                 cairo_set_line_width(pCR, width);
@@ -1248,8 +1054,6 @@ namespace lsp
                 if ((pCR == NULL) || (n < 2))
                     return;
 
-                //lsp_debug("DEBUG");
-
                 cairo_move_to(pCR, *(x++), *(y++));
                 for (size_t i=1; i < n; ++i)
                     cairo_line_to(pCR, *(x++), *(y++));
@@ -1262,8 +1066,6 @@ namespace lsp
             {
                 if ((pCR == NULL) || (n < 2) || (gr == NULL))
                     return;
-
-                //lsp_debug("DEBUG");
 
                 cairo_move_to(pCR, *(x++), *(y++));
                 for (size_t i=1; i < n; ++i)
@@ -1279,8 +1081,6 @@ namespace lsp
                 if ((pCR == NULL) || (n < 2))
                     return;
 
-                //lsp_debug("DEBUG");
-
                 cairo_move_to(pCR, *(x++), *(y++));
                 for (size_t i=1; i < n; ++i)
                     cairo_line_to(pCR, *(x++), *(y++));
@@ -1294,8 +1094,6 @@ namespace lsp
             {
                 if ((pCR == NULL) || (n < 2))
                     return;
-
-                //lsp_debug("DEBUG");
 
                 cairo_move_to(pCR, *(x++), *(y++));
                 for (size_t i=1; i < n; ++i)
@@ -1322,8 +1120,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 setSourceRGBA(color);
                 cairo_arc(pCR, x, y, r, 0.0f, M_PI * 2.0f);
                 cairo_fill(pCR);
@@ -1333,8 +1129,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 Win32CairoGradient *cg = static_cast<Win32CairoGradient *>(g);
                 cg->apply(pCR);
@@ -1350,8 +1144,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 float fxe = fx + fw, fye = fy + fh, ixe = ix + iw, iye = iy + ih;
 
@@ -1475,8 +1267,6 @@ namespace lsp
                 if (pCR == NULL)
                     return;
 
-                //lsp_debug("DEBUG");
-
                 fill_frame(color, fx, fy, fw, fh, ix, iy, iw, ih);
                 setSourceRGBA(color);
 
@@ -1533,8 +1323,6 @@ namespace lsp
                 if (pCR == NULL)
                     return false;
 
-                //lsp_debug("DEBUG");
-
                 return cairo_get_antialias(pCR) != CAIRO_ANTIALIAS_NONE;
             }
 
@@ -1542,8 +1330,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return false;
-
-                //lsp_debug("DEBUG");
 
                 bool old = cairo_get_antialias(pCR) != CAIRO_ANTIALIAS_NONE;
                 cairo_set_antialias(pCR, (set) ? CAIRO_ANTIALIAS_DEFAULT : CAIRO_ANTIALIAS_NONE);
@@ -1558,8 +1344,6 @@ namespace lsp
 
                 cairo_line_cap_t old = cairo_get_line_cap(pCR);
 
-                //lsp_debug("DEBUG");
-
                 return
                     (old == CAIRO_LINE_CAP_BUTT) ? SURFLCAP_BUTT :
                     (old == CAIRO_LINE_CAP_ROUND) ? SURFLCAP_ROUND : SURFLCAP_SQUARE;
@@ -1569,8 +1353,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return SURFLCAP_BUTT;
-
-                //lsp_debug("DEBUG");
 
                 cairo_line_cap_t old = cairo_get_line_cap(pCR);
 
@@ -1591,21 +1373,16 @@ namespace lsp
                 if ((pCR == NULL) || (pSurface == NULL) || (nType != ST_IMAGE))
                     return NULL;
 
-                //lsp_debug("DEBUG");
+                cairo_surface_t* imageSurface        = cairo_win32_surface_get_image(pSurface);
 
-                // cairo_surface_t* offSurface = cairo_win32_surface_get_image(pSurface);
-                // //bitmapData = reinterpret_cast<uint8_t *>(cairo_image_surface_get_data(offSurface));
-
-                nStride = cairo_image_surface_get_stride(pSurface);
-                return pData = reinterpret_cast<uint8_t *>(cairo_image_surface_get_data(pSurface));
+                nStride = cairo_image_surface_get_stride(imageSurface);
+                return pData = reinterpret_cast<uint8_t *>(cairo_image_surface_get_data(imageSurface));
             }
 
             void Win32CairoSurface::end_direct()
             {
                 if ((pCR == NULL) || (pSurface == NULL) || (nType != ST_IMAGE) || (pData == NULL))
                     return;
-
-                //lsp_debug("DEBUG");
 
                 cairo_surface_mark_dirty(pSurface);
                 pData = NULL;
@@ -1615,8 +1392,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 cairo_save(pCR);
                 cairo_rectangle(pCR, x, y, w, h);
@@ -1628,8 +1403,6 @@ namespace lsp
             {
                 if (pCR == NULL)
                     return;
-
-                //lsp_debug("DEBUG");
 
                 cairo_restore(pCR);
             }

@@ -32,11 +32,7 @@ namespace lsp
                     Win32Display           *pDisplay;
                     HDC                     pHdc;
                     HWND                    pWnd;
-                    BITMAPV4HEADER              bitmap_info;
-                    uint8_t *               bitmapData;
                     bool rendering;
-
-                    uint8_t *               bitmapCopy;
 
                 protected:
                     typedef struct font_context_t
@@ -107,7 +103,7 @@ namespace lsp
 
                     void endWithoutUpdate();
 
-                    void renderOffscreen(HDC dc, PAINTSTRUCT& paintStruct, int width, int height);
+                    void renderOffscreen(HDC dc, int width, int height);
 
                     ///////////////////////////////////////
 

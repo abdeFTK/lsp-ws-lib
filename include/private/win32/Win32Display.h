@@ -15,6 +15,8 @@
 
 #include <time.h>
 
+#include <string>
+
 #include <cairo/cairo.h>
 #include <ft2build.h>
 
@@ -90,6 +92,7 @@ namespace lsp
                     virtual status_t            add_font_alias(const char *name, const char *alias);
                     virtual status_t            remove_font(const char *name);
                     virtual void                remove_all_fonts();
+                    void                        drop_custom_fonts();
 
                     status_t init_freetype_library();
                     static void     destroy_font_object(font_t *font);
@@ -100,8 +103,38 @@ namespace lsp
                     bool                        add_window(Win32Window *wnd);
                     bool                        remove_window(Win32Window *wnd);
 
+                    /// Add window to the given grab group
+                    status_t                    grab_events(Win32Window *wnd, grab_t group);
+                    /// Remove window from grab group
+                    status_t                    ungrab_events(Win32Window *wnd);
+                    /// Prepare dispatch event. Save the current state of grab windows
+                    bool prepare_dispatch(Win32Window* src);
+                    /// Dispatch event to windows saved in the prepare state
+                    /// Returns true if the event have been dispatched to other windows
+                    bool dispatch_event(Win32Window* src, event_t *ev);
+                    /// Find root window by screen number
+                    Win32Window* findRootWindow(int screen);
+                    /// Find first not used screen number (starts at 1)
+                    int findFreeScreenNumber();
+
+                    int findScreenOwner(HWND hwnd);
+
+                    HANDLE                      get_cursor(mouse_pointer_t pointer);
+
+                    const HMODULE GetCurrentModule();
+                    const HMODULE GetCurrentDllModule();
+
+                    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+                   
+
                     cairo_user_data_key_t       sCairoUserDataKey;
-                    Win32Window* root;          // Root window of the display
+                    lltl::parray<Win32Window>     rootWindows;
+
+                    HINSTANCE hInstance;
+                    std::wstring wndClassName;
+
+                    
+                    
                     
                 protected:
                     volatile bool               bExit;
@@ -109,6 +142,10 @@ namespace lsp
                     FT_Library                  hFtLibrary;
                     lltl::pphash<char, font_t>  vCustomFonts;
                     lltl::parray<Win32Window>     vWindows;
+                    lltl::parray<Win32Window>     vGrab[__GRAB_TOTAL];
+                    lltl::parray<Win32Window>     sTargets;
+                    HANDLE                      vCursors[__MP_COUNT];
+                    HICON mainIcon;
                     
             };
         }
