@@ -319,15 +319,17 @@ namespace lsp
                             }
                         }
 
-                        size_t vKey = wParam;
-                        size_t state = decode_mouse_state(vKey);
-                        handle_mouse_move(pt, state);
                         if (!isTracking) {
                             isTracking = true;
                             set_mouse_pointer(enPointer);
                             handle_mouse_hover(true, pt);
                             TrackMouseEvent(&tme);
                         }
+
+                        size_t vKey = wParam;
+                        size_t state = decode_mouse_state(vKey);
+                        handle_mouse_move(pt, state);
+                        
                         return 0;
                     }
                 case WM_KEYDOWN:
@@ -647,10 +649,7 @@ namespace lsp
                     if (gen.nType != UIE_UNKNOWN) {
                         handler->handle_event(&gen);
                     }
-                } 
-
-                // let time to the window to handle the mouse event
-                ipc::Thread::sleep(1);
+                }
 
                 dspl->dispatch_event(src, &ue);
                 if (gen.nType != UIE_UNKNOWN) {
