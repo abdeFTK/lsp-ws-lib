@@ -382,6 +382,8 @@ namespace lsp
                 } else if (hwndParent != NULL) {
                     dwStyle = WS_CHILD;
                     ownerWnd = hwndParent;
+                    sSize.nWidth            = 1;
+                    sSize.nHeight           = 1;
                 } else {
                     dwStyle = WS_OVERLAPPEDWINDOW;
                     ownerWnd = hwndOwner;
@@ -400,7 +402,7 @@ namespace lsp
                     dwStyle,            // Window style
 
                     // Size and position
-                    0, 0, 100, 100,
+                    0, 0, sSize.nWidth, sSize.nHeight,
 
                     ownerWnd,    // Parent window    
                     NULL,        // Menu
@@ -412,7 +414,7 @@ namespace lsp
                     DWORD errorwnd = GetLastError();
                 } else {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR) this);
-                    pSurface = new Win32CairoSurface(static_cast<Win32Display *>(pDisplay), hwnd, 100, 100);
+                    pSurface = new Win32CairoSurface(static_cast<Win32Display *>(pDisplay), hwnd, sSize.nWidth, sSize.nHeight);
                     tme.cbSize = sizeof(TRACKMOUSEEVENT);
                     tme.dwFlags = TME_LEAVE;
                     tme.dwHoverTime = HOVER_DEFAULT;
