@@ -9,7 +9,6 @@
 
 #include <private/win32/Win32Display.h>
 
-
 #include <windows.h>
 
 namespace lsp
@@ -19,7 +18,7 @@ namespace lsp
         namespace win32
         {
             class Win32Display;
-            class Win32Window: public IWindow, public IEventHandler {
+            class Win32Window: public IWindow, public IEventHandler, public IDropTarget {
                 
                 public:
 
@@ -50,26 +49,9 @@ namespace lsp
 
                     void                do_destroy();
 
-                    static BOOL CALLBACK clipChildWindowCallback (HWND hwnd, LPARAM context)
-                    {
-                            ClipInfo* clipInfo = (ClipInfo*) context;
+                    static BOOL CALLBACK clipChildWindowCallback (HWND hwnd, LPARAM context);
 
-                            RECT rect;
-                            GetWindowRect(hwnd, &rect); 
-                            //lsp_debug("clientRect points left %ld, top %ld, right %ld, bottom %ld", rect.left, rect.top, rect.right, rect.bottom);
-                            HWND parent = GetParent(hwnd);
-                            MapWindowPoints(HWND_DESKTOP, parent, (LPPOINT) &rect, 2);
-                            //lsp_debug("clientRect mapped left %ld, top %ld, right %ld, bottom %ld", rect.left, rect.top, rect.right, rect.bottom);
-                            int res = ExcludeClipRect (clipInfo->dc, rect.left, rect.top, rect.right, rect.bottom);
-                            if (res == ERROR) {
-                                lsp_debug("clipChildWindowCallback left %ld, top %ld, right %ld, bottom %ld", rect.left, rect.top, rect.right, rect.bottom);
-                                lsp_debug("clipChildWindowCallback error");
-                            }
-
-                            return TRUE;
-                    }
-
-                    LRESULT internalWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+                    int internalWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
                     inline IEventHandler *get_handler() { return pHandler; }
 
@@ -173,6 +155,20 @@ namespace lsp
 
                     void handle_wm_size(UINT left, UINT right, UINT width, UINT height);
                     void handle_wm_paint();
+
+                    HRESULT DragEnter(IDataObject *pDataObj, DWORD grfKeyState, POINTL pt, DWORD *pdwEffect);
+
+                    HRESULT DragLeave();
+
+                    HRESULT DragOver(DWORD grfKeyState, POINTL pt, DWORD *pdwEffect);
+
+                    HRESULT Drop(IDataObject *pDataObj, DWORD grfKeyState, POINTL pt, DWORD *pdwEffect);
+
+                    ULONG AddRef();
+
+                    ULONG Release();
+
+                    HRESULT QueryInterface(REFIID riid, void   **ppvObject);
                     
                 private:
 
@@ -192,10 +188,11 @@ namespace lsp
                     size_t              nScreen;
                     mouse_pointer_t     enPointer;
 
-                    void handle_wm_create();
+                    void handle_wm_show();
                     
                     
-                    void handle_key(ui_event_type_t type);
+                    void handle_key(ui_event_type_t type, size_t vKey);
+                    void handle_char(ui_event_type_t type, size_t charCode);
                     void handle_mouse_button(code_t button, size_t type, POINT pt, size_t state);
                     void handle_mouse_move(POINT pt, size_t state);
                     void handle_mouse_scroll(int delta, POINT pt, size_t state);
@@ -203,9 +200,11 @@ namespace lsp
                     void drop_surface();
                     void handle_wm_hide();
                     void handle_wm_focus(bool focused);
-                    size_t decode_mouse_state(size_t vKey);
+                    void handle_wm_dropfiles(HDROP hdrop);
 
                     void calc_constraints(rectangle_t *dst, const rectangle_t *req);
+
+                    void setWndPos();
             };
 
         }

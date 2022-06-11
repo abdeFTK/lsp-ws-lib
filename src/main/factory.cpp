@@ -23,7 +23,9 @@
 
 #include <lsp-plug.in/common/debug.h>
 
-#include <private/win32/Win32Display.h>
+#ifdef PLATFORM_WINDOWS
+    #include <private/win32/Win32Display.h>
+#endif
 
 #ifdef USE_LIBX11
     #include <private/x11/X11Display.h>
@@ -49,7 +51,7 @@ namespace lsp
                     lsp_ws_free_display(dpy);
                 }
             }
-        #endif /* USE_LIBX11 */
+        #elif defined(PLATFORM_WINDOWS)
             // Create Win32 display
             {
                 win32::Win32Display *dpy = new win32::Win32Display();
@@ -63,6 +65,8 @@ namespace lsp
                     lsp_ws_free_display(dpy);
                 }
             }
+        #endif /* USE_LIBX11 */
+            
             return NULL;
         }
 

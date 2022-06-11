@@ -11,26 +11,12 @@
 #include <private/win32/Win32Display.h>
 #include <private/win32/Win32CairoSurface.h>
 
-// End mark for main PeekMessage loop
-#define        USER_LOOP_END     (WM_USER + 0)
+#include <strsafe.h>
 
-// OEM cursors (from winuser.h)
-#define OCR_NORMAL 32512
-#define OCR_IBEAM 32513
-#define OCR_WAIT 32514
-#define OCR_CROSS 32515
-#define OCR_UP 32516
-#define OCR_SIZE 32640
-#define OCR_ICON 32641
-#define OCR_SIZENWSE 32642
-#define OCR_SIZENESW 32643
-#define OCR_SIZEWE 32644
-#define OCR_SIZENS 32645
-#define OCR_SIZEALL 32646
-#define OCR_ICOCUR 32647
-#define OCR_NO 32648
-#define OCR_HAND 32649
-#define OCR_APPSTARTING 32650
+// End mark for main PeekMessage loop
+#define USER_LOOP_END (WM_USER + 0)
+
+#define WND_CLS_NAME L"LSP_Window"
 
 static HMODULE currentModuleHandle = NULL;
 static HMODULE currentDllModuleHandle = NULL;
@@ -44,21 +30,21 @@ namespace lsp
             static int cursor_shapes[] =
             {
                 -1,                         // MP_NONE
-                OCR_NORMAL,                  // MP_ARROW
-                OCR_SIZEALL,                // MP_ARROW_LEFT
-                OCR_SIZEALL,                // MP_ARROW_RIGHT
-                OCR_SIZEALL,                // MP_ARROW_UP
-                OCR_SIZEALL,                // MP_ARROW_DOWN
+                OCR_NORMAL,                 // MP_ARROW
+                OCR_SIZEWE,                 // MP_ARROW_LEFT
+                OCR_SIZEWE,                 // MP_ARROW_RIGHT
+                OCR_SIZENS,                 // MP_ARROW_UP
+                OCR_SIZENS,                 // MP_ARROW_DOWN
                 OCR_HAND,                   // MP_HAND
                 OCR_CROSS,                  // MP_CROSS
                 OCR_IBEAM,                  // MP_IBEAM
                 OCR_HAND,                   // MP_DRAW
-                OCR_CROSS,                   // MP_PLUS
+                OCR_CROSS,                  // MP_PLUS
                 OCR_SIZENESW,               // MP_SIZE_NESW
                 OCR_SIZENS,                 // MP_SIZE_NS
                 OCR_SIZEWE,                 // MP_SIZE_WE
                 OCR_SIZENWSE,               // MP_SIZE_NWSE
-                OCR_UP,                // MP_UP_ARROW
+                OCR_UP,                     // MP_UP_ARROW
                 OCR_WAIT,                   // MP_HOURGLASS
                 OCR_HAND,                   // MP_DRAG
                 OCR_NO,                     // MP_NO_DROP
@@ -67,15 +53,15 @@ namespace lsp
                 OCR_SIZENS,                 // MP_VPSLIT
                 OCR_HAND,                   // MP_MULTIDRAG
                 OCR_APPSTARTING,            // MP_APP_START
-                OCR_NORMAL                    // MP_HELP
+                OCR_NORMAL                  // MP_HELP
             };
 
             Win32Display::Win32Display()
             {
                 bExit           = false;
+                SetRect(&dragRect, 1, 1, 0, 0);
                 hFtLibrary = NULL;
                 bzero(&sCairoUserDataKey, sizeof(sCairoUserDataKey));
-                wndClassName = std::wstring(L"LSP_Window");
             }
 
             Win32Display::~Win32Display()
@@ -85,9 +71,9 @@ namespace lsp
             LRESULT CALLBACK Win32Display::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             {
                 Win32Window* window = reinterpret_cast<Win32Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-                if (window) return window->internalWindowProc(hwnd, msg, wParam, lParam);
-               
-                return DefWindowProcW(hwnd, msg, wParam, lParam);
+                int res = -1;
+                if (window) res = window->internalWindowProc(hwnd, msg, wParam, lParam);
+                return res >= 0 ? res : DefWindowProcW(hwnd, msg, wParam, lParam);
             }
 
             const HMODULE Win32Display::GetCurrentModule()
@@ -138,7 +124,7 @@ namespace lsp
                 wc.cbSize = sizeof(WNDCLASSEXW);
                 wc.lpfnWndProc   = WndProc;
                 wc.hInstance     = hInstance;
-                wc.lpszClassName = wndClassName.c_str();
+                wc.lpszClassName = WND_CLS_NAME;
                 wc.style = 0;
                 wc.hIcon = mainIcon;
                 wc.hbrBackground = NULL;
@@ -176,7 +162,7 @@ namespace lsp
                 if (sOwnerWnd != NULL) {
                     ownerHwnd = sOwnerWnd->hwnd;
                 }
-                Win32Window* root = new Win32Window(this, NULL, NULL, NULL, ownerHwnd, nScreen, false, hInstance, wndClassName.c_str());
+                Win32Window* root = new Win32Window(this, NULL, NULL, NULL, ownerHwnd, nScreen, false, hInstance, WND_CLS_NAME);
                 rootWindows.add(root);
                 return root;
             }
@@ -185,7 +171,7 @@ namespace lsp
             {
                 Win32Window* sRootWnd = findRootWindow(screen);
                 if (sRootWnd != NULL) {
-                    return new Win32Window(this, NULL, NULL, sRootWnd->hwnd, NULL, screen, false, hInstance, wndClassName.c_str());
+                    return new Win32Window(this, NULL, NULL, sRootWnd->hwnd, NULL, screen, false, hInstance, WND_CLS_NAME);
                 }
                 return NULL;
             }
@@ -195,7 +181,7 @@ namespace lsp
                 lsp_trace("handle = %p", handle);
 
                 int nScreen = findFreeScreenNumber();
-                Win32Window* root = new Win32Window(this, NULL, handle, NULL, NULL, nScreen, false, hInstance, wndClassName.c_str());
+                Win32Window* root = new Win32Window(this, NULL, handle, NULL, NULL, nScreen, false, hInstance, WND_CLS_NAME);
                 rootWindows.add(root);
                 return root;
             }
@@ -203,7 +189,7 @@ namespace lsp
             IWindow *Win32Display::wrap_window(void *handle)
             {
                 int nScreen = findFreeScreenNumber();
-                Win32Window* root = new Win32Window(this, NULL, handle, NULL, NULL, nScreen, true, hInstance, wndClassName.c_str());
+                Win32Window* root = new Win32Window(this, NULL, handle, NULL, NULL, nScreen, true, hInstance, WND_CLS_NAME);
                 rootWindows.add(root);
                 return root;
             }
@@ -630,27 +616,232 @@ namespace lsp
 
             status_t Win32Display::set_clipboard(size_t id, IDataSource *ds)
             {
-                return STATUS_OK;
+                 // Acquire reference
+                if (ds != NULL)
+                    ds->acquire();
+
+                Win32Window* rootWindow = findRootWindow(default_screen());
+                HWND rootHwnd = NULL;
+                if (rootWindow != NULL)
+                    rootHwnd = rootWindow->hwnd;
+
+                if (rootHwnd == NULL) {
+                    ds->release();
+                    return STATUS_BAD_ARGUMENTS;
+                }
+                // Open the clipboard, and empty it. 
+                if (!OpenClipboard(rootHwnd)) {
+                    ds->release();
+                    return STATUS_BAD_ARGUMENTS; 
+                } 
+                EmptyClipboard();
+
+                status_t result = STATUS_OK;
+                const char *const *mimes = ds->mime_types();
+                if (mimes != NULL)
+                {
+                    // Open source
+                    io::IInStream *s = ds->open("UTF8_STRING");
+                    if (s != NULL)
+                    {
+                        
+                        lsp::wssize_t nbBytes = s->avail();
+                        // Perform data copy
+                        char buf[nbBytes + 4];
+                        result = s->read_fully(buf, nbBytes);
+                        if (nbBytes == result) {
+                            result = STATUS_OK;
+                        } else {
+                            result = STATUS_NO_MEM;
+                        }
+                        buf[nbBytes] = '\0';
+                        buf[nbBytes + 1] = '\0';
+                        buf[nbBytes + 2] = '\0';
+                        buf[nbBytes + 3] = '\0';
+                        nbBytes += 4;
+
+                        // Convert to wide string
+                        int nb = MultiByteToWideChar(CP_UTF8, 0, buf, -1, NULL, 0);
+                        WCHAR wbuf[nb];
+                        MultiByteToWideChar(CP_UTF8, 0, buf, -1, wbuf, nb);
+                        
+                        int dwBytes = nb * sizeof(WCHAR);
+                        if (result == STATUS_OK) {
+                            // Allocate a global memory object for the text. 
+                            hglbCopy = GlobalAlloc(GMEM_MOVEABLE, dwBytes); 
+                            if (hglbCopy == NULL) 
+                            { 
+                                result = STATUS_NO_MEM;
+                            } 
+                        }
+                        if (result == STATUS_OK) 
+                        {
+                            // Lock the handle and copy the text to the buffer. 
+                            lptstrCopy = (LPWSTR)GlobalLock(hglbCopy); 
+                            memcpy(lptstrCopy, wbuf, dwBytes); 
+                            GlobalUnlock(hglbCopy);
+                    
+                            // Place the handle on the clipboard. 
+                            HANDLE clipHandle = SetClipboardData(CF_UNICODETEXT, hglbCopy); 
+
+                            if (clipHandle == NULL) {
+                                DWORD err = GetLastError();
+                                lsp_debug("SetClipboardData ERROR : %ld", err);
+                            }
+                        }
+                        
+                        // Close the stream
+                        if (result == STATUS_OK)
+                            result = s->close();
+                        else
+                            s->close();
+                    }
+                    else
+                        result = STATUS_UNKNOWN_ERR;
+                }
+                else
+                    result = STATUS_NO_DATA;
+
+                // Close the clipboard. 
+                CloseClipboard();
+                ds->release();
+
+                return result;
             }
 
             status_t Win32Display::get_clipboard(size_t id, IDataSink *dst)
             {
-                return STATUS_OK;
+                 // Acquire data sink
+                if (dst == NULL)
+                    return STATUS_BAD_ARGUMENTS;
+                dst->acquire();
+
+                Win32Window* rootWindow = findRootWindow(default_screen());
+                HWND rootHwnd = NULL;
+                if (rootWindow != NULL)
+                    rootHwnd = rootWindow->hwnd;
+
+                if (rootHwnd == NULL) {
+                    dst->release();
+                    return STATUS_BAD_ARGUMENTS;
+                }
+                
+                static const char* const mimes[] = {"UTF8_STRING", NULL};
+
+                status_t result = STATUS_BAD_ARGUMENTS;
+                // Open sink
+                ssize_t idx = dst->open(mimes);
+                if (idx >= 0)
+                {
+                    if (OpenClipboard(rootHwnd)) 
+                    {
+                        if (IsClipboardFormatAvailable(CF_UNICODETEXT)) { // && OpenClipboard(rootHwnd)) {
+                        
+                            hglbPaste = GetClipboardData(CF_UNICODETEXT); 
+                            if (hglbPaste != NULL) 
+                            { 
+                                lptstrPaste = (LPWSTR) GlobalLock(hglbPaste); 
+                                if (lptstrPaste != NULL) 
+                                { 
+                                    // Convert
+                                    size_t wnb;
+                                    if(SUCCEEDED(StringCchLengthW(lptstrPaste, STRSAFE_MAX_CCH, &wnb)))
+                                    {
+                                        int nb = WideCharToMultiByte(CP_UTF8, 0, lptstrPaste, wnb, NULL, 0, NULL, NULL);
+                                        char buf[nb];
+                                        WideCharToMultiByte(CP_UTF8, 0, lptstrPaste, wnb, buf, nb, NULL, NULL);
+
+                                        // Write the buffer to the sink
+                                        result = dst->write(buf, nb);
+                                    }
+                                    GlobalUnlock(lptstrPaste);
+                                }
+                            } 
+                        } else if (IsClipboardFormatAvailable(CF_HDROP)) 
+                        {
+                            HDROP hdrop = (HDROP)GetClipboardData(CF_HDROP); 
+                            WCHAR filename[MAX_PATH];
+                            int wnb = DragQueryFileW(hdrop, 0, filename, MAX_PATH);
+                            // Convert
+                            if(wnb > 0)
+                            {
+                                int nb = WideCharToMultiByte(CP_UTF8, 0, filename, wnb, NULL, 0, NULL, NULL);
+                                char buf[nb];
+                                WideCharToMultiByte(CP_UTF8, 0, filename, wnb, buf, nb, NULL, NULL);
+                                // Write the buffer to the sink
+                                char prefix[] = "file=";
+                                size_t prNb = 0;
+                                StringCchLengthA(prefix, sizeof(prefix), &prNb);
+                                dst->write(prefix, prNb);
+                                result = dst->write(buf, nb);
+                            }
+                            //DragFinish(hdrop);
+                        }
+                        CloseClipboard(); 
+                    }
+                }
+
+                // Close sink
+                dst->close(result);
+                dst->release();
+
+                return result;
+            }
+
+            void Win32Display::setDroppedFile(const WCHAR* filename) 
+            {
+                int nb = WideCharToMultiByte(CP_UTF8, 0, filename, -1, NULL, 0, NULL, NULL);
+                char buf[nb];
+                WideCharToMultiByte(CP_UTF8, 0, filename, -1, buf, nb, NULL, NULL);
+                char prefix[] = "file://";
+                size_t prNb = 0;
+                StringCchLengthA(prefix, sizeof(prefix), &prNb);
+                droppedFile.clear();
+                droppedFile.set_utf8(prefix, prNb);
+                droppedFile.append_utf8(buf);
             }
 
             const char * const *Win32Display::get_drag_ctypes()
             {
-                return NULL;
+                static const char* const drag_c_types[] = {"text/uri-list", NULL};
+                return drag_c_types;
             }
 
             status_t Win32Display::reject_drag()
             {
+                SetRect(&dragRect, 1, 1, 0, 0);
+                droppedFile.clear();
                 return STATUS_OK;
             }
 
             status_t Win32Display::accept_drag(IDataSink *sink, drag_t action, bool internal, const rectangle_t *r)
             {
-                return STATUS_OK;
+                if (droppedFile.is_empty()) {
+                    SetRect(&dragRect, r->nLeft, r->nTop,  r->nLeft + r->nWidth, r->nTop + r->nHeight);
+                    return STATUS_OK;
+                }
+
+                // Acquire data sink
+                if (sink == NULL)
+                    return STATUS_BAD_ARGUMENTS;
+
+                sink->acquire();
+
+                static const char* const drag_mimes[] = {"text/uri-list", NULL};
+                status_t result = STATUS_BAD_ARGUMENTS;
+                // Open sink
+                ssize_t idx = sink->open(drag_mimes);
+                if (idx >= 0)
+                {
+                    result = sink->write(droppedFile.get_utf8(), droppedFile.length());
+                }
+
+                droppedFile.clear();
+                // Close sink
+                sink->close(result);
+                sink->release();
+
+                return result;
             }
 
             status_t Win32Display::get_pointer_location(size_t *screen, ssize_t *left, ssize_t *top)
@@ -749,6 +940,7 @@ namespace lsp
                     lsp_error("FT_MANAGE Error creating freetype font face for font '%s', error=%d", f->name, int(ft_status));
                     return STATUS_UNKNOWN_ERR;
                 }
+                FT_Select_Charmap(f->ft_face, FT_ENCODING_UNICODE); 
 
                 // Register font data
                 if (!vCustomFonts.create(name, f))

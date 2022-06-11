@@ -2,7 +2,6 @@
 #define _UI_WIN32_WIN32DISPLAY_H_
 
 #include <lsp-plug.in/ws/version.h>
-#include <lsp-plug.in/ws/version.h>
 #include <lsp-plug.in/ws/IDisplay.h>
 
 #include <lsp-plug.in/common/atomic.h>
@@ -12,10 +11,6 @@
 #include <lsp-plug.in/lltl/pphash.h>
 
 #include <private/win32/Win32Window.h>
-
-#include <time.h>
-
-#include <string>
 
 #include <cairo/cairo.h>
 #include <ft2build.h>
@@ -119,6 +114,8 @@ namespace lsp
 
                     int findScreenOwner(HWND hwnd);
 
+                    void setDroppedFile(const WCHAR* filename);
+
                     HANDLE                      get_cursor(mouse_pointer_t pointer);
 
                     const HMODULE GetCurrentModule();
@@ -131,9 +128,12 @@ namespace lsp
                     lltl::parray<Win32Window>     rootWindows;
 
                     HINSTANCE hInstance;
-                    std::wstring wndClassName;
 
-                    
+                    HGLOBAL hglbCopy;
+                    LPWSTR  lptstrCopy; 
+                    HGLOBAL   hglbPaste; 
+                    LPWSTR    lptstrPaste; 
+                    RECT dragRect;
                     
                     
                 protected:
@@ -146,6 +146,9 @@ namespace lsp
                     lltl::parray<Win32Window>     sTargets;
                     HANDLE                      vCursors[__MP_COUNT];
                     HICON mainIcon;
+
+                private:
+                    LSPString droppedFile;
                     
             };
         }

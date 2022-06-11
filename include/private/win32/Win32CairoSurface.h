@@ -8,7 +8,6 @@
 #include <lsp-plug.in/ws/IGradient.h>
 #include <lsp-plug.in/ws/ISurface.h>
 
-
 #include <private/win32/Win32Display.h>
 
 #include <windows.h>
