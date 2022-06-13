@@ -21,6 +21,12 @@
 static HMODULE currentModuleHandle = NULL;
 static HMODULE currentDllModuleHandle = NULL;
 
+// Define the placement-new for our construction/destruction tricks
+inline void *operator new (size_t size, void *ptr)
+{
+    return ptr;
+}
+
 namespace lsp
 {
     namespace ws
@@ -80,7 +86,6 @@ namespace lsp
             {
                 if (currentModuleHandle == NULL)
                 {
-                    static int lpMod = 0;
                     BOOL status = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                                     (LPCWSTR) this,
                                                     &currentModuleHandle);
@@ -92,6 +97,7 @@ namespace lsp
             {
                 if (currentDllModuleHandle == NULL)
                 {
+                    // Static local variable to get the current DLL module handle
                     static int lpMod = 0;
                     BOOL status = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                                     (LPCWSTR) &lpMod,
@@ -102,22 +108,18 @@ namespace lsp
 
             status_t Win32Display::init(int argc, const char **argv)
             {
-                // Get Main application icon
+                // Get application icon path
                 WCHAR szPath[MAX_PATH];
-                WCHAR filename[] = L"lsp.ico";
-                //WORD iconIdx;
+                char icon_filename[] = "lsp.ico";
                 GetModuleFileNameW(GetCurrentDllModule(), szPath, MAX_PATH);
-
                 LSPString str;
                 str.append_utf16(szPath);
                 io::Path path;
                 path.set(&str);
                 path.parent();
-                path.append_child("lsp.ico");
-                WCHAR* szDirPath = path.as_string()->clone_utf16();
-
-                //mainIcon = ExtractAssociatedIconW(GetCurrentModule(), szPath, &iconIdx);
-                mainIcon = (HICON)LoadImageW(NULL, szDirPath, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_LOADFROMFILE);
+                path.append_child(icon_filename);
+                // Load app icon
+                mainIcon = (HICON)LoadImageW(NULL, path.as_string()->get_native_utf16(), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_LOADFROMFILE);
                 // Register the window class.
                 hInstance = GetCurrentModule();
                 WNDCLASSEXW wc = { };
@@ -140,8 +142,12 @@ namespace lsp
                 {
                     vCursors[i] = LoadImageW(NULL, MAKEINTRESOURCEW(cursor_shapes[i]), IMAGE_CURSOR, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
                 }
+
+                // Init OLE for drag and drop
+                HRESULT oleres = OleInitialize(NULL);
+                lsp_debug("OleInitialize : %ld", oleres);
+
                 return STATUS_OK;
-                //return IDisplay::init(argc, argv);
             }
 
             HANDLE Win32Display::get_cursor(mouse_pointer_t pointer)
@@ -246,7 +252,16 @@ namespace lsp
                     vGrab[i].clear();
                 sTargets.clear();
 
+                // Drop allocated information about monitors
+                drop_monitors(&vMonitors);
+
                 DestroyIcon(mainIcon);
+
+                OleUninitialize();
+
+                if(UnregisterClassW(WND_CLS_NAME, hInstance) == 0) {
+                    lsp_debug("UnregisterClassW fails");
+                }
 
                 IDisplay::destroy();
             }
@@ -616,6 +631,9 @@ namespace lsp
 
             status_t Win32Display::set_clipboard(size_t id, IDataSource *ds)
             {
+                if (id != CBUF_CLIPBOARD) 
+                    return STATUS_OK;
+
                  // Acquire reference
                 if (ds != NULL)
                     ds->acquire();
@@ -711,7 +729,10 @@ namespace lsp
 
             status_t Win32Display::get_clipboard(size_t id, IDataSink *dst)
             {
-                 // Acquire data sink
+                if (id != CBUF_CLIPBOARD) 
+                    return STATUS_OK;
+
+                // Acquire data sink
                 if (dst == NULL)
                     return STATUS_BAD_ARGUMENTS;
                 dst->acquire();
@@ -735,7 +756,7 @@ namespace lsp
                 {
                     if (OpenClipboard(rootHwnd)) 
                     {
-                        if (IsClipboardFormatAvailable(CF_UNICODETEXT)) { // && OpenClipboard(rootHwnd)) {
+                        if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
                         
                             hglbPaste = GetClipboardData(CF_UNICODETEXT); 
                             if (hglbPaste != NULL) 
@@ -775,7 +796,6 @@ namespace lsp
                                 dst->write(prefix, prNb);
                                 result = dst->write(buf, nb);
                             }
-                            //DragFinish(hdrop);
                         }
                         CloseClipboard(); 
                     }
@@ -833,7 +853,11 @@ namespace lsp
                 ssize_t idx = sink->open(drag_mimes);
                 if (idx >= 0)
                 {
-                    result = sink->write(droppedFile.get_utf8(), droppedFile.length());
+                    size_t nbBytes = 0;
+                    HRESULT res = StringCbLengthA(droppedFile.get_utf8(), STRSAFE_MAX_CCH * sizeof(char), &nbBytes);
+                    if (SUCCEEDED(res) && nbBytes > 0) {
+                        result = sink->write(droppedFile.get_utf8(), nbBytes);
+                    }
                 }
 
                 droppedFile.clear();
@@ -1134,6 +1158,54 @@ namespace lsp
                 // Destroy all font objects
                 for (size_t i=0, n=fonts.size(); i<n; ++i)
                     unload_font_object(fonts.uget(i));
+            }
+
+            void Win32Display::drop_monitors(lltl::darray<MonitorInfo> *list)
+            {
+                for (size_t i=0, n=list->size(); i<n; ++i)
+                {
+                    MonitorInfo *mi = list->uget(i);
+                    mi->name.~LSPString();
+                }
+                list->flush();
+            }
+
+            BOOL Win32Display::MonitorEnumProc(HMONITOR hmonitor, HDC hdc, LPRECT mrect, LPARAM data)
+            {
+                lltl::darray<MonitorInfo>* nmonitors = reinterpret_cast<lltl::darray<MonitorInfo>*>(data);
+                MONITORINFOEXW info;
+                info.cbSize = sizeof(MONITORINFOEXW);
+                GetMonitorInfoW(hmonitor, &info);
+
+                MonitorInfo monInfo;
+                // Save the name of monitor
+                new (static_cast<void *>(&monInfo.name)) LSPString;
+                monInfo.name.set_native_utf16(info.szDevice);
+                // Other flags
+                monInfo.primary = (info.dwFlags & MONITORINFOF_PRIMARY) == MONITORINFOF_PRIMARY;
+                monInfo.rect.nLeft  = info.rcWork.left;
+                monInfo.rect.nTop   = info.rcWork.top;
+                monInfo.rect.nWidth = info.rcWork.right - info.rcWork.left;
+                monInfo.rect.nHeight= info.rcWork.bottom - info.rcWork.top;
+
+                nmonitors->add(monInfo);
+                
+                return TRUE;
+            }
+
+            const MonitorInfo *Win32Display::enum_monitors(size_t *count)
+            {
+                lltl::darray<MonitorInfo> result;
+                
+                EnumDisplayMonitors(NULL, NULL, MonitorEnumProc, (LPARAM)&result);
+
+                // Update state, drop previous state and return result
+                vMonitors.swap(result);
+                drop_monitors(&result);
+
+                if (count != NULL)
+                    *count = vMonitors.size();
+                return vMonitors.array();
             }
         }
     }

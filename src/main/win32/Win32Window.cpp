@@ -19,9 +19,6 @@
 #define CHILD_BORDER_WIDTH 1
 #define CHILD_BORDER_COLOR 0x00000000
 
-// True while the window is being resized from the bottom right corner
-static bool inMouseResize = false;
-
 namespace lsp
 {
     namespace ws
@@ -43,9 +40,6 @@ namespace lsp
                 sSize.nTop              = 0;
                 sSize.nWidth            = 32;
                 sSize.nHeight           = 32;
-
-                rootWndPos.x            = 0;
-                rootWndPos.y            = 0;
 
                 sConstraints.nMinWidth  = -1;
                 sConstraints.nMinHeight = -1;
@@ -118,14 +112,17 @@ namespace lsp
                     {
                         RECT rect;
                         WINDOWPOS* windowPos = (WINDOWPOS*)lParam;
-                        
-                        rootWndPos.x = windowPos->x;
-                        rootWndPos.y = windowPos->y;
-
-                        if (hwndParent == NULL) {
-                            GetClientRect(hwnd, &rect);
-                        } else {
-                            SetRect(&rect, windowPos->x, windowPos->y, windowPos->cx, windowPos->cy);
+                        UINT extraWidth = 0;
+                        UINT extraHeight = 0;
+                        if (!has_parent()) {
+                            WINDOWINFO wndInfo;
+                            wndInfo.cbSize = sizeof(WINDOWINFO);
+                            GetWindowInfo(hwnd, &wndInfo);
+                            extraWidth = (wndInfo.rcClient.left - wndInfo.rcWindow.left) + (wndInfo.rcWindow.right - wndInfo.rcClient.right);
+                            extraHeight = (wndInfo.rcClient.top - wndInfo.rcWindow.top) + (wndInfo.rcWindow.bottom - wndInfo.rcClient.bottom);
+                        }
+                        SetRect(&rect, windowPos->x, windowPos->y, windowPos->cx - extraWidth, windowPos->cy - extraHeight);
+                        if (hwndParent != NULL) {
                             InflateRect(&rect, -CHILD_BORDER_WIDTH, -CHILD_BORDER_WIDTH);
                         }
 
@@ -235,18 +232,6 @@ namespace lsp
                         pt.x = GET_X_LPARAM(lParam);
                         pt.y = GET_Y_LPARAM(lParam);
 
-                        if (hwndNative != NULL) {
-                            RECT rect;
-                            GetClientRect(hwnd, &rect);
-                            if (pt.x > rect.right - 10 && pt.y > rect.bottom - 10) {
-                                SetCapture(hwnd);
-                                HANDLE cur = static_cast<Win32Display *>(pDisplay)->get_cursor(MP_SIZE_NWSE);
-                                if (cur != NULL)
-                                    SetCursor((HCURSOR)cur);
-                                inMouseResize = true;
-                            }
-                        }
-
                         size_t vKey = wParam;
                         size_t state = decode_mouse_state(vKey);
                         handle_mouse_button(MCB_LEFT, UIE_MOUSE_DOWN, pt, state);
@@ -258,13 +243,6 @@ namespace lsp
                         pt.x = GET_X_LPARAM(lParam);
                         pt.y = GET_Y_LPARAM(lParam);
 
-                        if (inMouseResize) {
-                            HANDLE cur = static_cast<Win32Display *>(pDisplay)->get_cursor(MP_ARROW);
-                            if (cur != NULL)
-                                SetCursor((HCURSOR)cur);
-                        }
-                        inMouseResize = false;
-
                         size_t vKey = wParam;
                         size_t state = decode_mouse_state(vKey);
                         handle_mouse_button(MCB_LEFT, UIE_MOUSE_UP, pt, state);
@@ -272,9 +250,6 @@ namespace lsp
                     }
                 case WM_CAPTURECHANGED:
                     {
-                        if (hwndNative != NULL) {
-                             inMouseResize = false;
-                        }
                         break;
                     }
                 case WM_RBUTTONDOWN:
@@ -322,24 +297,6 @@ namespace lsp
                         POINT pt;
                         pt.x = GET_X_LPARAM(lParam); 
                         pt.y = GET_Y_LPARAM(lParam); 
-
-                        if (hwndNative != NULL) {
-                            RECT rect;
-                            GetClientRect(hwnd, &rect);
-                            if (inMouseResize && GetCapture() == hwnd) {
-                                long minWidth = sConstraints.nMinWidth;
-                                long minHeight = sConstraints.nMinHeight;
-                                int width = lsp_max(minWidth, pt.x); 
-                                int height = lsp_max(minHeight, pt.y); 
-                                resize(width, height);
-                                return 0;
-                            } else if (pt.x > rect.right - 10 && pt.y > rect.bottom - 10) {
-                                HANDLE cur = static_cast<Win32Display *>(pDisplay)->get_cursor(MP_SIZE_NWSE);
-                                if (cur != NULL)
-                                    SetCursor((HCURSOR)cur);
-                                return 0;
-                            }
-                        }
 
                         if (!isTracking) {
                             isTracking = true;
@@ -446,7 +403,7 @@ namespace lsp
                     dwStyle,            // Window style
 
                     // Size and position
-                    0, 0, sSize.nWidth, sSize.nHeight,
+                    CW_USEDEFAULT, CW_USEDEFAULT, sSize.nWidth, sSize.nHeight,
 
                     ownerWnd,    // Parent window    
                     NULL,        // Menu
@@ -1044,11 +1001,6 @@ namespace lsp
                 sSize.nWidth    = width;
                 sSize.nHeight   = height;
 
-                int screenWidth = GetSystemMetrics(SM_CXSCREEN); 
-                rootWndPos.x = (screenWidth - sSize.nWidth ) / 2;
-                int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-                rootWndPos.y = (screenHeight - sSize.nHeight ) / 2;
-
                 if (!bWrapper) {
                     setWndPos();
                 }
@@ -1099,18 +1051,36 @@ namespace lsp
 
             status_t Win32Window::get_geometry(rectangle_t *realize)
             {
-                if (realize != NULL)
+                if (realize != NULL) {
                     *realize    = sSize;
-                return STATUS_OK;
+                    return STATUS_OK;
+                }
+                return STATUS_BAD_ARGUMENTS;
             }
 
             status_t Win32Window::get_absolute_geometry(rectangle_t *realize)
             {
-                if (realize != NULL) {
-                    realize->nLeft      = sSize.nLeft;
-                    realize->nTop       = sSize.nTop;
+                if (realize == NULL)
+                    return STATUS_BAD_ARGUMENTS;
+                if (hwnd == NULL)
+                {
+                    realize->nLeft      = 0;
+                    realize->nTop       = 0;
                     realize->nWidth     = sSize.nWidth;
                     realize->nHeight    = sSize.nHeight;
+                    return STATUS_BAD_STATE;
+                }
+                
+                if (has_parent()) {
+                    *realize    = sSize;
+                } else {
+                    RECT rect;
+                    SetRect(&rect, sSize.nLeft, sSize.nTop, sSize.nWidth, sSize.nLeft);
+                    MapWindowPoints(hwnd, HWND_DESKTOP, (LPPOINT)&rect, 2);
+                    realize->nLeft      = rect.left;
+                    realize->nTop       = rect.top;
+                    realize->nWidth     = rect.right;
+                    realize->nHeight    = rect.bottom;
                 }
                 return STATUS_OK;
             }
@@ -1141,6 +1111,16 @@ namespace lsp
             }
 
             void Win32Window::setWndPos() {
+                ssize_t nLeft = sSize.nLeft;
+                ssize_t nTop = sSize.nTop;
+                if (hwndOwner != NULL) {
+                    POINT p;
+                    p.x = nLeft;
+                    p.y = nTop;
+                    MapWindowPoints(hwndOwner, HWND_DESKTOP, &p, 1);
+                    nLeft = p.x;
+                    nTop = p.y;
+                }
                 WINDOWINFO wndInfo;
                 wndInfo.cbSize = sizeof(WINDOWINFO);
                 GetWindowInfo(hwnd, &wndInfo);
@@ -1154,11 +1134,7 @@ namespace lsp
                     extraWidth = CHILD_BORDER_WIDTH * 2;
                     extraHeight = CHILD_BORDER_WIDTH * 2;
                 }
-                if (hwndNative == NULL && hwndParent == NULL) {
-                    SetWindowPos(hwnd, NULL, rootWndPos.x, rootWndPos.y, sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
-                } else {
-                    SetWindowPos(hwnd, NULL,sSize.nLeft + leftBorderOffset, sSize.nTop + topBorderOffset,sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
-                }
+                SetWindowPos(hwnd, NULL, nLeft + leftBorderOffset, nTop + topBorderOffset,sSize.nWidth + extraWidth,sSize.nHeight + extraHeight, SWP_NOCOPYBITS | SWP_NOZORDER | SWP_NOACTIVATE);
             }
 
             status_t Win32Window::show()
@@ -1186,15 +1162,11 @@ namespace lsp
 
             status_t Win32Window::set_left(ssize_t left)
             {
-                int screenWidth = GetSystemMetrics(SM_CXSCREEN); 
-                rootWndPos.x = (screenWidth - sSize.nWidth ) / 2;
                 return move(left, sSize.nTop);
             }
 
             status_t Win32Window::set_top(ssize_t top)
             {
-                int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-                rootWndPos.y = (screenHeight - sSize.nHeight ) / 2;
                 return move(sSize.nLeft, top);
             }
 
@@ -1382,6 +1354,11 @@ namespace lsp
                 //lsp_debug("set_role %s", wrole);
 
                 return STATUS_OK;
+            }
+
+            bool Win32Window::has_parent() const
+            {
+                return (hwndParent != NULL || hwndNative != NULL);
             }
         }
     }

@@ -87,6 +87,7 @@ namespace lsp
                     virtual status_t            add_font_alias(const char *name, const char *alias);
                     virtual status_t            remove_font(const char *name);
                     virtual void                remove_all_fonts();
+                    virtual const MonitorInfo  *enum_monitors(size_t *count);
                     void                        drop_custom_fonts();
 
                     status_t init_freetype_library();
@@ -97,6 +98,8 @@ namespace lsp
 
                     bool                        add_window(Win32Window *wnd);
                     bool                        remove_window(Win32Window *wnd);
+
+                    static void                 drop_monitors(lltl::darray<MonitorInfo> *list);
 
                     /// Add window to the given grab group
                     status_t                    grab_events(Win32Window *wnd, grab_t group);
@@ -122,6 +125,8 @@ namespace lsp
                     const HMODULE GetCurrentDllModule();
 
                     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+                    static BOOL MonitorEnumProc(HMONITOR hmonitor, HDC hdc, LPRECT mrect, LPARAM data);
                    
 
                     cairo_user_data_key_t       sCairoUserDataKey;
@@ -144,6 +149,7 @@ namespace lsp
                     lltl::parray<Win32Window>     vWindows;
                     lltl::parray<Win32Window>     vGrab[__GRAB_TOTAL];
                     lltl::parray<Win32Window>     sTargets;
+                    lltl::darray<MonitorInfo>   vMonitors;
                     HANDLE                      vCursors[__MP_COUNT];
                     HICON mainIcon;
 

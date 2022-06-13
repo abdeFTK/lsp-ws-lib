@@ -138,6 +138,8 @@ namespace lsp
 
                     virtual status_t set_role(const char *wrole);
 
+                    virtual bool has_parent() const;
+
                     virtual status_t set_visibility(bool visible);
 
                     static bool         check_click(const btn_event_t *ev);
@@ -147,7 +149,6 @@ namespace lsp
                     size_limit_t        sConstraints;
                     ISurface           *pSurface;
                     rectangle_t         sSize;
-                    POINT               rootWndPos;
                     size_t              nActions;
                     HWND hwnd;
                     HWND hwndNative;
